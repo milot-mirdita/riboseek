@@ -34,7 +34,7 @@ jobs:
       - name: Run Regression Suite
         if: ${{ env.regression == 1 }}
         run: |
-          ${{ github.workspace }}/regression/run_regression.sh ${{ github.workspace }}/build/riboseek ${{ github.workspace }}/scratch
+          ${{ github.workspace }}/util/regression/run_regression.sh ${{ github.workspace }}/build/riboseek ${{ github.workspace }}/scratch
 
       - name: Upload MacOS Universal
         uses: actions/upload-artifact@v4

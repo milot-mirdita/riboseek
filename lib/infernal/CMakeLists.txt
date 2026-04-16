@@ -31,17 +31,15 @@ if (NOT EXISTS ${INFERNAL_CONFIGURE_DIR}/src/p7_config.h)
         list(APPEND _hmmer_configure_args --host=x86_64-apple-darwin)
     elseif (CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
         list(APPEND _hmmer_configure_args --host=aarch64-apple-darwin)
-    elseif (CMAKE_CROSSCOMPILING)
-        if (CMAKE_C_COMPILER_TARGET)
-            # Clang exposes the full target triple (e.g. aarch64-linux-gnu)
-            list(APPEND _hmmer_configure_args --host=${CMAKE_C_COMPILER_TARGET})
-        elseif (CMAKE_LIBRARY_ARCHITECTURE)
-            # GCC multilib toolchains set this (e.g. aarch64-linux-gnu)
-            list(APPEND _hmmer_configure_args --host=${CMAKE_LIBRARY_ARCHITECTURE})
-        else ()
-            # Fallback: construct a basic triplet from CMake's system variables
-            string(TOLOWER "${CMAKE_SYSTEM_NAME}" _system_lc)
-            list(APPEND _hmmer_configure_args --host=${CMAKE_SYSTEM_PROCESSOR}-${_system_lc})
+    elseif (NOT APPLE)
+        # Ask the compiler for its target triple
+        execute_process(
+                COMMAND ${CMAKE_C_COMPILER} -dumpmachine
+                OUTPUT_VARIABLE _compiler_target
+                OUTPUT_STRIP_TRAILING_WHITESPACE
+        )
+        if (_compiler_target)
+            list(APPEND _hmmer_configure_args --host=${_compiler_target})
         endif ()
     endif ()
     file(MAKE_DIRECTORY ${INFERNAL_CONFIGURE_DIR})
