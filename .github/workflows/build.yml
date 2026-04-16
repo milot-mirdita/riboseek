@@ -171,15 +171,14 @@ jobs:
     name: Upload Artifacts
     runs-on: ubuntu-latest
     needs: [build_macos, build_ubuntu, build_ubuntu_cross]
-    # if: github.event_name != 'pull_request'
-    if: false
+    if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
 
       - name: Prepare Artifacts Directory
         run: |
           mkdir riboseek
-          cp -f README.md LICENSE.md riboseek
+          # cp -f README.md LICENSE.md riboseek
           mkdir riboseek/bin
 
       # MacOS
