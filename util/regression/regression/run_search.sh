@@ -1,0 +1,24 @@
+#!/bin/sh -e
+zstd -d -q "${DATADIR}/rfam_lookup_target_clan.tsv.zst" -o "${RESULTS}/rfam_lookup_target_clan.tsv"
+zstd -d -q "${DATADIR}/target.tsv.zst" -o "${RESULTS}/target.tsv"
+export DATADIR="${RESULTS}"
+
+QUERY="${EXAMPLEDIR}/QUERY.fasta"
+QUERYDB="${RESULTS}/query"
+"${RIBOSEEK}" createdb "${QUERY}" "${QUERYDB}"
+awk 'BEGIN { printf("%c%c%c%c",0,0,0,0); exit; }' > "${QUERYDB}.dbtype"
+
+TARGET="${EXAMPLEDIR}/DB.fasta"
+TARGETDB="${RESULTS}/target"
+"${RIBOSEEK}" createdb "${TARGET}" "${TARGETDB}"
+awk 'BEGIN { printf("%c%c%c%c",0,0,0,0); exit; }' > "${TARGETDB}.dbtype"
+"${RIBOSEEK}" search "${QUERYDB}" "${TARGETDB}" "${RESULTS}/results" "${RESULTS}/tmp"
+
+"${RIBOSEEK}" convertalis "${QUERYDB}" "${TARGETDB}" "${RESULTS}/results" "${RESULTS}/results.m8"
+
+"${EVALUATE}" "${RESULTS}/results.m8" "${RESULTS}/roc1_auc.tsv" | tee "${RESULTS}/evaluation.log"
+ACTUAL=$(grep "^ROC1-AUC:" "${RESULTS}/evaluation.log" | cut -d" " -f2 | cut -d"," -f1)
+EXPECTED="0.000000"
+awk -v actual="$ACTUAL" -v expected="$EXPECTED" \
+    'BEGIN { print (actual == expected) ? "GOOD" : "BAD"; print "Expected: ", expected; print "Actual: ", actual; }' \
+    > "${RESULTS}.report"
