@@ -285,6 +285,8 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
                                      filter.filter(res, alnResults, (int)(par.covMSAThr * 100), qid_vec, par.qsc, (int)(par.filterMaxSeqId * 100), par.Ndiff, par.filterMinEnable)
                                      :
                                      res.setSize;
+             //MultipleAlignment::print(res, &subMat);
+
             if (returnAlnRes) {
                 for (size_t i = 0; i < (filteredSetSize - 1); ++i) {
                     size_t len = Matcher::resultToBuffer(buffer, alnResults[i], true);
@@ -320,7 +322,7 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
                         masker.maskPssm(centerSequence, par.maskProb, pssmRes);
                     }
                     pssmRes.toBuffer(centerSequence, subMat, result);
-                }
+                } 
             }
             resultWriter.writeData(result.c_str(), result.length(), queryKey, thread_idx, writePlain == false);
             result.clear();
