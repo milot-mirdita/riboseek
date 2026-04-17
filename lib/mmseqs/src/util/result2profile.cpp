@@ -125,10 +125,14 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
 
     // adjust score of each match state by -0.2 to trim alignment
     SubstitutionMatrix subMat(par.scoringMatrixFile.values.aminoacid().c_str(), 2.0f, -0.2f);
+#ifdef RIBOSEEK
     const bool isDinuc = (DBReader<unsigned int>::getExtendedDbtype(targetDbtype) & Parameters::DBTYPE_EXTENDED_DINUCLEOTIDE) != 0;
     EvalueComputation evalueComputation(tDbr->getAminoAcidDBSize(), &subMat,
                                         par.gapOpen.values.aminoacid(), par.gapExtend.values.aminoacid(),
                                         isDinuc && (par.strand == 2), isDinuc);
+#else
+    EvalueComputation evalueComputation(tDbr->getAminoAcidDBSize(), &subMat, par.gapOpen.values.aminoacid(), par.gapExtend.values.aminoacid());
+#endif
 
     if (qDbr->getDbtype() == -1 || targetSeqType == -1) {
         Debug(Debug::ERROR) << "Please recreate your database or add a .dbtype file to your sequence/profile database\n";
@@ -226,7 +230,7 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
                         Debug(Debug::ERROR) << "Sequence " << key << " does not exist in target sequence database\n";
                         EXIT(EXIT_FAILURE);
                     }
-
+#ifdef RIBOSEEK
                     // Parse alignment first to determine strand (reverse if qStartPos > qEndPos)
                     bool isReverse = false;
                     if (columns > Matcher::ALN_RES_WITHOUT_BT_COL_CNT) {
@@ -242,6 +246,14 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
                     seqSet.emplace_back(std::vector<unsigned char>(edgeSequence.numSequence, edgeSequence.numSequence + edgeSequence.L));
 
                     if (columns <= Matcher::ALN_RES_WITHOUT_BT_COL_CNT) {
+#else
+                    edgeSequence.mapSequence(edgeId, key, tDbr->getData(edgeId, thread_idx), tDbr->getSeqLen(edgeId));
+                    seqSet.emplace_back(std::vector<unsigned char>(edgeSequence.numSequence, edgeSequence.numSequence + edgeSequence.L));
+
+                    if (columns > Matcher::ALN_RES_WITHOUT_BT_COL_CNT) {
+                        alnResults.emplace_back(Matcher::parseAlignmentRecord(data));
+                    } else {
+#endif
                         // Recompute if not all the backtraces are present
                         if (isQueryInit == false) {
                             matcher.initQuery(&centerSequence);
@@ -256,7 +268,8 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
             // Recompute if not all the backtraces are present
             MultipleAlignment::MSAResult res = aligner.computeMSA(&centerSequence, seqSet, alnResults, true);
 
-            if (queryKey == 0) {
+#ifdef RIBOSEEK
+            if (false && queryKey == 0) {
                 FILE *f = fopen("/tmp/riboseek_msa.txt", "a");
                 if (f) {
                     fprintf(f, "RBS qkey=%u setSize=%zu centerLen=%zu\n", queryKey, res.setSize, res.centerLength);
@@ -279,6 +292,7 @@ int result2profile(int argc, const char **argv, const Command &command, bool ret
                     }
                 }
             }
+#endif
 
             // do not count query
             size_t filteredSetSize = (isFiltering == true)  ?
