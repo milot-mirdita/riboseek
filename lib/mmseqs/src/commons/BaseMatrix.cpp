@@ -157,14 +157,14 @@ void BaseMatrix::generateSubMatrix(double ** probMatrix, double ** subMatrix, fl
 #ifdef RIBOSEEK
 static std::vector<size_t> returnCanonicalIndices(size_t index) {
     switch (index) {
-        case 16: return {0, 1, 2, 3};     // AX
-        case 17: return {4, 5, 6, 7};     // CX
-        case 18: return {8, 9, 10, 11};   // GX
-        case 19: return {12, 13, 14, 15}; // TX/UX
-        case 20: return {0, 4, 8, 12};    // XA
-        case 21: return {1, 5, 9, 13};    // XC
-        case 22: return {2, 6, 10, 14};   // XG
-        case 23: return {3, 7, 11, 15};   // XU/T
+        case 16: return {1, 5, 9, 13};     // AX
+        case 17: return {2, 4, 8, 14};     // CX
+        case 18: return {0, 7, 10, 12};   // GX
+        case 19: return {3, 6, 11, 15}; // TX/UX
+        case 20: return {1, 2, 3, 10};    // XA
+        case 21: return {0, 4, 5, 11};    // XC
+        case 22: return {6, 9, 12, 14};   // XG
+        case 23: return {7, 8, 13, 15};   // XU/T
         case 24: return {0, 1, 2, 3, 4, 5, 6, 7, 8, 9, 10, 11, 12, 13, 14, 15}; // XX
         default: return {};
     }
