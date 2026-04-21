@@ -45,21 +45,21 @@ static void dinucCalcLocalAaBiasCorrection(const BaseMatrix *m,
     if (reverse) {
         std::reverse(int_sequence, int_sequence + N);
     }
-    const int windowSize = 50;
+    const int windowSize = 80;
     for (int i = 0; i < N; i++) {
         const int minPos = std::max(0, (i - windowSize / 2));
         const int maxPos = std::min(N, (i + (windowSize+1) / 2));
         int windowLength = maxPos - minPos;
 
         int sumSubScores = 0;
-        // If the character is not a canonical amino acid, skip it
-        if (int_sequence[i] >= 16) {
+        // Fully unknown XX has no informative local composition signal.
+        if (int_sequence[i] == 24) {
             compositionBias[i] = 0.0;
             continue;
         }
         short *subMat = m->subMatrix[int_sequence[i]];
         for (int j = minPos; j < maxPos; j++) {
-	    if (int_sequence[j] >= 16) {
+	    if (int_sequence[j] == 24) {
 	        windowLength--;
 	        continue;
 	    }

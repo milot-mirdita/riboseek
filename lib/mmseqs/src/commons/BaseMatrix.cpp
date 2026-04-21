@@ -171,102 +171,36 @@ std::vector<size_t> BaseMatrix::returnCanonicalIndices(size_t index) {
 }
 
 static void recalcNonCanonicalDinuc(double ** probMatrix, double ** subMatrix, int size) {
-    // calculate background distribution for the amino acids
     double *pBack = new double[size];
     BaseMatrix::computeBackground(probMatrix, pBack, size, true);
+
     for (int i = 16; i < size; i++) {
         std::vector<size_t> dinucs_row = BaseMatrix::returnCanonicalIndices(i);
-        std::vector<double> probsA, probsB;
-        ///////////////////////////////////
-        // commented out for other trials
-        float pBack_row = 0.0;
+        double pBack_row = 0.0;
         for (size_t row_idx : dinucs_row) {
             pBack_row += pBack[row_idx];
         }
-        ///////////////////////////////////
+
         for (int j = 0; j < size; j++) {
-            std::vector<size_t> dinucs_col;
-            if (j > 15) {
-                dinucs_col = BaseMatrix::returnCanonicalIndices(j);
+            std::vector<size_t> dinucs_col = (j > 15) ? BaseMatrix::returnCanonicalIndices(j)
+                                                      : std::vector<size_t>(1, j);
+            double pBack_col = 0.0;
+            for (size_t col_idx : dinucs_col) {
+                pBack_col += pBack[col_idx];
             }
-            // } else {
-                // dinucs_col = {j};
-            // }
-            probsA.clear();
-            // If dinucs_col is empty
-            if (dinucs_col.size() == 0) {
-                // j <= 15
-                for (size_t row_idx : dinucs_row) {
-                    // Save the pBack^2
-                    probsA.push_back(pBack[row_idx] * pBack[row_idx]);
-                }
-                double numerator = 0.0, denominator = 0.0;
-                for (size_t k = 0; k < probsA.size(); k++) {
-                    numerator += probsA[k] * std::pow(2.0, subMatrix[dinucs_row[k]][j]);
-                    denominator += probsA[k];
-                }
-                subMatrix[i][j] = std::log2(numerator / denominator);
-                subMatrix[j][i] = subMatrix[i][j];
-            } else {
-                double probsA_sum = 0.0, probsB_sum = 0.0;
-                for (size_t row_idx : dinucs_row) {
-                    probsA.push_back(pBack[row_idx]);
-                    probsA_sum += pBack[row_idx] * pBack[row_idx];
-                }
-                probsB.clear();
+
+            double probSum = 0.0;
+            for (size_t row_idx : dinucs_row) {
                 for (size_t col_idx : dinucs_col) {
-                    probsB.push_back(pBack[col_idx]);
-                    probsB_sum += pBack[col_idx] * pBack[col_idx];
+                    probSum += probMatrix[row_idx][col_idx];
                 }
-                double numerator = 0.0, denominator = probsA_sum * probsB_sum;
-                for (size_t k = 0; k < probsA.size(); k++) {
-                    for (size_t l = 0; l < probsB.size(); l++) {
-                        numerator += probsA[k] * probsB[l] * std::pow(2.0, subMatrix[dinucs_row[k]][dinucs_col[l]]);
-                    }
-                }
-                subMatrix[i][j] = std::log2(numerator / denominator);
-                subMatrix[j][i] = subMatrix[i][j];
             }
-            ///////////////////////////////////
-            // float probSum = 0.0, pBack_col = 0.0;
-            // for (size_t col_idx : dinucs_col) {
-            //     for (size_t row_idx : dinucs_row) {
-            //         probSum += probMatrix[row_idx][col_idx];
-            //     }
-            //     pBack_col += pBack[col_idx];
-            // }
-            // subMatrix[i][j] = std::log2(probSum / (pBack_row * pBack_col));
-            ///////////////////////////////////
-            // if (dinucs_col.empty()) {
-            //     // double score_sum = 0.0;
-            //     // for (size_t row_idx : dinucs_row) {
-            //     //     score_sum += subMatrix[row_idx][j];
-            //     // }
-            //     // subMatrix[i][j] = score_sum / static_cast<double>(dinucs_row.size());
-            //     float pBack_col = pBack[j];
-            //     for (size_t row_idx : dinucs_row) {
-            //         probSum += probMatrix[row_idx][j];
-            //     }
-            //     subMatrix[i][j] = std::log2(probSum / pBack_row / pBack_col);
-            //     subMatrix[j][i] = subMatrix[i][j];
-            // } else {
-                // double score_sum = 0.0;
-                // for (size_t row_idx : dinucs_row) {
-                //     for (size_t col_idx : dinucs_col) {
-                //         score_sum += subMatrix[row_idx][col_idx];
-                //     }
-                // }
-                // subMatrix[i][j] = score_sum / static_cast<double>(dinucs_row.size() * dinucs_col.size());
-            // subMatrix[j][i] = subMatrix[i][j];
-            // }
+
+            subMatrix[i][j] = std::log2(probSum / (pBack_row * pBack_col));
+            subMatrix[j][i] = subMatrix[i][j];
         }
     }
     delete[] pBack;
-    // subMatrix[size - 1][size - 1] = -0.5;
-    // for (int i = 0; i < size; i++) {
-    //     subMatrix[size - 1][i] = -0.5;
-    //     subMatrix[i][size - 1] = -0.5;
-    // }
 }
 #endif
 
