@@ -45,15 +45,24 @@ static void dinucCalcLocalAaBiasCorrection(const BaseMatrix *m,
     if (reverse) {
         std::reverse(int_sequence, int_sequence + N);
     }
-    const int windowSize = 50;
+    const int windowSize = 75;
     for (int i = 0; i < N; i++) {
         const int minPos = std::max(0, (i - windowSize / 2));
         const int maxPos = std::min(N, (i + (windowSize+1) / 2));
-        const int windowLength = maxPos - minPos;
+        int windowLength = maxPos - minPos;
 
         int sumSubScores = 0;
+        // Ambiguous dinucleotides are scored in alignment but omitted from local composition bias.
+        if (int_sequence[i] >= 16) {
+            compositionBias[i] = 0.0;
+            continue;
+        }
         short *subMat = m->subMatrix[int_sequence[i]];
         for (int j = minPos; j < maxPos; j++) {
+	    if (int_sequence[j] >= 16) {
+	        windowLength--;
+	        continue;
+	    }
             sumSubScores += subMat[int_sequence[j]];
         }
 

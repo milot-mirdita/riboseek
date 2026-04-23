@@ -155,7 +155,7 @@ void BaseMatrix::generateSubMatrix(double ** probMatrix, double ** subMatrix, fl
 }
 
 #ifdef RIBOSEEK
-static std::vector<size_t> returnCanonicalIndices(size_t index) {
+std::vector<size_t> BaseMatrix::returnCanonicalIndices(size_t index) {
     switch (index) {
         case 16: return {1, 5, 9, 13};     // AX
         case 17: return {2, 4, 8, 14};     // CX
@@ -170,33 +170,37 @@ static std::vector<size_t> returnCanonicalIndices(size_t index) {
     }
 }
 
-static void recalcNonCanonicalDinuc(double ** subMatrix, int size) {
+static void recalcNonCanonicalDinuc(double ** probMatrix, double ** subMatrix, int size) {
+    double *pBack = new double[size];
+    BaseMatrix::computeBackground(probMatrix, pBack, size, true);
+
     for (int i = 16; i < size; i++) {
-        std::vector<size_t> dinucs_row = returnCanonicalIndices(i);
+        std::vector<size_t> dinucs_row = BaseMatrix::returnCanonicalIndices(i);
+        double pBack_row = 0.0;
+        for (size_t row_idx : dinucs_row) {
+            pBack_row += pBack[row_idx];
+        }
+
         for (int j = 0; j < size; j++) {
-            std::vector<size_t> dinucs_col;
-            if (j > 15) {
-                dinucs_col = returnCanonicalIndices(j);
+            std::vector<size_t> dinucs_col = (j > 15) ? BaseMatrix::returnCanonicalIndices(j)
+                                                      : std::vector<size_t>(1, j);
+            double pBack_col = 0.0;
+            for (size_t col_idx : dinucs_col) {
+                pBack_col += pBack[col_idx];
             }
-            if (dinucs_col.empty()) {
-                double score_sum = 0.0;
-                for (size_t row_idx : dinucs_row) {
-                    score_sum += subMatrix[row_idx][j];
+
+            double probSum = 0.0;
+            for (size_t row_idx : dinucs_row) {
+                for (size_t col_idx : dinucs_col) {
+                    probSum += probMatrix[row_idx][col_idx];
                 }
-                subMatrix[i][j] = score_sum / static_cast<double>(dinucs_row.size());
-                subMatrix[j][i] = subMatrix[i][j];
-            } else {
-                double score_sum = 0.0;
-                for (size_t row_idx : dinucs_row) {
-                    for (size_t col_idx : dinucs_col) {
-                        score_sum += subMatrix[row_idx][col_idx];
-                    }
-                }
-                subMatrix[i][j] = score_sum / static_cast<double>(dinucs_row.size() * dinucs_col.size());
-                subMatrix[j][i] = subMatrix[i][j];
             }
+
+            subMatrix[i][j] = std::log2(probSum / (pBack_row * pBack_col));
+            subMatrix[j][i] = subMatrix[i][j];
         }
     }
+    delete[] pBack;
 }
 #endif
 
@@ -212,7 +216,7 @@ void BaseMatrix::generateSubMatrix(double ** probMatrix, float ** subMatrixPseud
     // For dinucleotide matrices, recalculate non-canonical entries (indices 16+)
     // by averaging the corresponding canonical entries
     if (size >= 25 && matrixName.find("dinuc") != std::string::npos) {
-        recalcNonCanonicalDinuc(sm, size);
+        recalcNonCanonicalDinuc(probMatrix, sm, size);
     }
 #endif
 
