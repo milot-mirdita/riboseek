@@ -3471,6 +3471,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
                 }
 
                 bool hasRegionCoord = false;
+                bool prefilterIsRev = false;
                 int dbStart = 0, dbEnd = 0, qStart = 0, qEnd = 0;
                 if (*endptr == '\t') {
                     const char *p = endptr;
@@ -3487,7 +3488,9 @@ int cmscan(int argc, const char **argv, const Command &command) {
                     if (col >= 10 && colStart[4] && colStart[5] && colStart[7] && colStart[8]) {
                         dbStart = Util::fast_atoi<int>(colStart[7]);
                         dbEnd = Util::fast_atoi<int>(colStart[8]);
-                        if (dbStart > dbEnd) std::swap(dbStart, dbEnd);
+                        // mmseqs convention: dbStart > dbEnd means minus strand.
+                        prefilterIsRev = (dbStart > dbEnd);
+                        if (prefilterIsRev) std::swap(dbStart, dbEnd);
                         qStart = Util::fast_atoi<int>(colStart[4]);
                         qEnd = Util::fast_atoi<int>(colStart[5]);
                         if (qStart > qEnd) std::swap(qStart, qEnd);
@@ -3525,10 +3528,18 @@ int cmscan(int argc, const char **argv, const Command &command) {
                     maxHitLen = clenFloor;
                 }
 
-                std::string revSeq = reverseComplement(regionSeq);
+                // If the prefilter already disambiguated strand (hasRegionCoord),
+                // scan only that strand. Fall back to both strands otherwise.
+                const bool scanFwd = !hasRegionCoord || !prefilterIsRev;
+                const bool scanRev = !hasRegionCoord ||  prefilterIsRev;
                 std::vector<Hit> fwdHits, revHits;
-                runInfernalExactScan(qm.exactModel, regionSeq, wantInside, fwdHits, fs.id, maxHitLen);
-                runInfernalExactScan(qm.exactModel, revSeq,    wantInside, revHits, fs.id, maxHitLen);
+                if (scanFwd) {
+                    runInfernalExactScan(qm.exactModel, regionSeq, wantInside, fwdHits, fs.id, maxHitLen);
+                }
+                if (scanRev) {
+                    const std::string revSeq = reverseComplement(regionSeq);
+                    runInfernalExactScan(qm.exactModel, revSeq, wantInside, revHits, fs.id, maxHitLen);
+                }
 
                 const unsigned int fullLen = static_cast<unsigned int>(fs.seq.size());
                 const int regionLen = static_cast<int>(regionSeq.size());
