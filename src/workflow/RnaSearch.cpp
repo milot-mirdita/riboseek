@@ -138,7 +138,11 @@ int rnasearch(int argc, const char **argv, const Command &command) {
     for (int i = 0; i < par.numIterations; i++) {
         // Match old MMseqs2 nucl-nucl iterative search: realign disabled across
         // all iterations (Search.cpp lines 511-518 in the forked MMseqs2).
-        par.realign = false;
+	if (i == 0) {
+            par.realign = true;
+	} else {
+            par.realign = false;
+	}
 
         if (i == (par.numIterations - 1)) {
             par.evalThr = originalEval;
