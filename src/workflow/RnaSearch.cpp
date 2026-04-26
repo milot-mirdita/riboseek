@@ -21,7 +21,7 @@ static void setRnaSearchDefaults(Parameters *p) {
     // Match old mmseqs pipeline defaults for dinucleotide search
     p->gapOpen = MultiParam<NuclAA<int>>(NuclAA<int>(23, 23));
     p->gapExtend = MultiParam<NuclAA<int>>(NuclAA<int>(1, 1));
-    p->pca = MultiParam<PseudoCounts>(PseudoCounts(1.3, 1.3));
+    p->pca = MultiParam<PseudoCounts>(PseudoCounts(1.1, 1.1));
     p->pcb = MultiParam<PseudoCounts>(PseudoCounts(1.8, 1.8));
     p->maskProfile = 0;
     if (p->PARAM_MAX_SEQ_LEN.wasSet == false) {
