@@ -16,9 +16,9 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      # - uses: actions/checkout@v4
+      #   with:
+      #     submodules: true
 
       - name: Install Rust Toolchain
         run: |
@@ -64,9 +64,9 @@ jobs:
             BUILD_TYPE: ASan
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      # - uses: actions/checkout@v4
+      #   with:
+      #     submodules: true
 
       - name: Install G++
         run: |
@@ -124,9 +124,9 @@ jobs:
             CPREF: aarch64
 
     steps:
-      - uses: actions/checkout@v4
-        with:
-          submodules: recursive
+      # - uses: actions/checkout@v4
+      #   with:
+      #     submodules: true
 
       - name: Install Toolchain
         run: |
