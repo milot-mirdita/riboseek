@@ -16,7 +16,7 @@ jobs:
     name: macOS
     runs-on: macos-latest
     steps:
-      # - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       #   with:
       #     submodules: true
 
@@ -64,7 +64,7 @@ jobs:
             BUILD_TYPE: ASan
 
     steps:
-      # - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       #   with:
       #     submodules: true
 
@@ -124,7 +124,7 @@ jobs:
             CPREF: aarch64
 
     steps:
-      # - uses: actions/checkout@v4
+      - uses: actions/checkout@v4
       #   with:
       #     submodules: true
 
