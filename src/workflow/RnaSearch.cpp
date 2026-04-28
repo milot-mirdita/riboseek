@@ -18,6 +18,7 @@ static void setRnaSearchDefaults(Parameters *p) {
     p->sensitivity = 7.5;
     p->evalThr = 0.001;
     p->evalProfile = 0.1;
+    p->searchType = Parameters::SEARCH_TYPE_NUCLEOTIDES;
     // Match old mmseqs pipeline defaults for dinucleotide search
     p->gapOpen = MultiParam<NuclAA<int>>(NuclAA<int>(23, 23));
     p->gapExtend = MultiParam<NuclAA<int>>(NuclAA<int>(1, 1));
@@ -71,6 +72,7 @@ int rnasearch(int argc, const char **argv, const Command &command) {
     cmd.addVariable("VERBOSITY", par.createParameterString(par.onlyverbosity).c_str());
     cmd.addVariable("THREADS_COMP_PAR", par.createParameterString(par.threadsandcompression).c_str());
     cmd.addVariable("VERB_COMP_PAR", par.createParameterString(par.verbandcompression).c_str());
+    cmd.addVariable("GPU", par.gpu ? "TRUE" : NULL);
 
     // RNA always uses rnaalign
     cmd.addVariable("ALIGN_MODULE", "rnaalign");
