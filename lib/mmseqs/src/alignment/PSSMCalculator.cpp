@@ -313,8 +313,7 @@ void PSSMCalculator::computeLogPSSM(BaseMatrix *subMat, char *pssm, const float 
                 pssmVal = static_cast<char>((pssmVal < 0.0) ? pssmVal - 0.5 : pssmVal + 0.5);
                 float truncPssmVal =  std::min(pssmVal, 127.0f);
                 truncPssmVal       =  std::max(-128.0f, truncPssmVal);
-                // pssm[idx] = truncPssmVal;
-		pssm[idx] = 0;
+                pssm[idx] = truncPssmVal;
             }
         } else {
             for(; aa < Sequence::PROFILE_AA_SIZE; aa++) {
