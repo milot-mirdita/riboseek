@@ -115,13 +115,13 @@ int result2dnamsa(int argc, const char **argv, const Command &command) {
                             break;
                         case 'I':
                             out.push_back('-');
-
                             break;
+
                         case 'D':
                             seqPos++;
+                            break;
 //                                out.append(1, seqChar);
 
-                            break;
                     }
                 }
                 int qEndPos = std::max(res.qStartPos, res.qEndPos);

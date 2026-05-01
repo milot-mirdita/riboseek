@@ -47,6 +47,14 @@ LocalParameters::LocalParameters() : Parameters(),
     splitstrand.push_back(&PARAM_V);
 
     cmbuild.push_back(&PARAM_CALIBRATE_CM);
+    // hhfilter/rMSA-style row filter on the cmbuild input MSA (off by default)
+    cmbuild.push_back(&PARAM_FILTER_MSA);
+    cmbuild.push_back(&PARAM_FILTER_MAX_SEQ_ID);
+    cmbuild.push_back(&PARAM_FILTER_QID);
+    cmbuild.push_back(&PARAM_FILTER_QSC);
+    cmbuild.push_back(&PARAM_FILTER_COV);
+    cmbuild.push_back(&PARAM_FILTER_NDIFF);
+    cmbuild.push_back(&PARAM_FILTER_MIN_ENABLE);
     cmbuild.push_back(&PARAM_THREADS);
     cmbuild.push_back(&PARAM_COMPRESSED);
     cmbuild.push_back(&PARAM_V);

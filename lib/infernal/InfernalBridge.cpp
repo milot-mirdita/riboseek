@@ -175,6 +175,11 @@ static bool runCmBuildInProcess(const std::string &stockholmText, std::string &c
     std::vector<std::string> cmbArgs;
     cmbArgs.push_back("infernal-cmbuild");
     cmbArgs.push_back("-F");
+    // --hand: respect #=GC RF in the input MSA. Caller emits an all-'x' RF
+    // line (length = qLen), so every column becomes a consensus match column
+    // and CM clen == qLen. This is what makes downstream cmsearch traces
+    // query-centric.
+    cmbArgs.push_back("--hand");
     cmbArgs.push_back(cmPath);
     cmbArgs.push_back(stoPath);
     bool ok = (runInfernalMainInProcess(&infernal_cmbuild_main, cmbArgs) == 0);

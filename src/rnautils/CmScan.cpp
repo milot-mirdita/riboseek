@@ -76,6 +76,20 @@ enum CmStateType {
     CM_ST_UNKNOWN
 };
 
+// Node-type encoding for cm_localize. Matches Infernal cm.h ndtype except we
+// only carry the types relevant to begin/end eligibility decisions.
+enum CmNodeType {
+    CM_ND_UNKNOWN = 0,
+    CM_ND_ROOT,
+    CM_ND_MATP,
+    CM_ND_MATL,
+    CM_ND_MATR,
+    CM_ND_BEGL,
+    CM_ND_BEGR,
+    CM_ND_BIF,
+    CM_ND_END,
+};
+
 struct CmState {
     CmStateType type;
     int idx;
@@ -88,6 +102,12 @@ struct CmState {
     int mapRight;              // consensus/map coordinate, -1 if none
     int dmin1;
     int dmax1;
+    // Local-mode (cm_localize) metadata.
+    int nodeIdx = -1;
+    CmNodeType nodeType = CM_ND_UNKNOWN;
+    bool isFirstOfNode = false;
+    double beginSc = NEG_INF;  // log2(begin prob); finite only at begin-eligible heads
+    double endSc = NEG_INF;    // log2(end prob);   finite only at end-eligible heads
 };
 
 struct ExactStateExec {
@@ -129,6 +149,12 @@ struct InfernalExactModel {
     double nullProb[4] = {0.25, 0.25, 0.25, 0.25}; // A,C,G,U
     double null2Omega = 1.0 / 65536.0;
     double null3Omega = 1.0 / 65536.0;
+    // Local-mode parameters (Infernal cm_localize). Currently parsed only for
+    // diagnostic use; DP wiring is the next step in the 2YGH_1 fix.
+    double pBegin = 0.0;     // local-begin probability (0 = glocal)
+    double pEnd = 0.0;       // local-end probability  (0 = glocal)
+    double elSelf = 0.0;     // EL self-transition score (nats per residue, ≤0)
+    bool hasLocalCfg = false;
     ExpTail expLC;
     ExpTail expLI;
     ExpTail expGC;
@@ -285,6 +311,29 @@ static bool cmTruncModesEnabled() {
         const char *env = std::getenv("MMSEQS_CMSCAN_TRUNC");
         // Infernal-like default: truncation modes enabled unless explicitly disabled.
         cached = (env != NULL && std::string(env) == "0") ? 0 : 1;
+    }
+    return cached == 1;
+}
+
+static bool cmNull3Enabled() {
+    static int cached = -1;
+    if (cached == -1) {
+        const char *env = std::getenv("MMSEQS_CMSCAN_NULL3");
+        cached = (env != NULL && std::string(env) == "0") ? 0 : 1;
+    }
+    return cached == 1;
+}
+
+// Optimal-accuracy alignment opt-in. When set, runInfernalExactScan switches
+// from CYK (max over paths) to Inside+Outside+OA (posterior-coverage trace),
+// reusing the vit buffer across phases: Inside in vit, then alpha overwritten
+// in-place by OA scores during the OA fill, then vit reinterpreted as a uint8
+// shadow matrix for traceback. One extra float buffer (beta) is allocated.
+static bool cmOAEnabled() {
+    static int cached = -1;
+    if (cached == -1) {
+        const char *env = std::getenv("MMSEQS_CMSCAN_OA");
+        cached = (env != NULL && std::string(env) == "1") ? 1 : 0;
     }
     return cached == 1;
 }
@@ -582,6 +631,41 @@ static CM_ALWAYS_INLINE void log2AccFastAddF(float x, bool &has, float &acc) {
     acc = log2SumExp2ApproxF(acc, x);
 }
 
+#if defined(CM_HAS_SSE2)
+// 4-lane SIMD log-sum-exp in log2 space, using the scalar LUT for the
+// log2(1 + 2^(-d)) correction. Drop-in replacement for `_mm_max_ps` in the
+// fast-deck fill when running Inside (sum over paths) instead of CYK (max).
+//
+// Lane semantics: for each i, returns log2(2^a[i] + 2^b[i]).
+// NEG_INF handling: if max(a,b) == -inf the result is -inf; if only one is
+// -inf the other is returned. This matches the scalar fall-through path.
+static CM_ALWAYS_INLINE __m128 log2SumExp2ApproxFSse(__m128 a, __m128 b) {
+    static const float NEG_INF_F_LSEX = -std::numeric_limits<float>::infinity();
+    const __m128 mx = _mm_max_ps(a, b);
+    const __m128 mn = _mm_min_ps(a, b);
+    // d = mx - mn >= 0 when both finite. When mn == -inf, the diff is +inf
+    // (or NaN if mx is also -inf); the scalar LUT clamps to TABLE_MAX_X so
+    // non-NaN large d returns 0. We mask the both-NEG_INF lane separately.
+    const __m128 niV = _mm_set1_ps(NEG_INF_F_LSEX);
+    const __m128 isMxNI = _mm_cmpeq_ps(mx, niV);
+    // Replace mn with mx in the both-NEG_INF lanes so d collapses to 0 and
+    // the LUT lookup is well-defined; we'll clobber the result with NEG_INF
+    // afterwards via the mask.
+    const __m128 mnSafe = _mm_or_ps(_mm_and_ps(isMxNI, mx), _mm_andnot_ps(isMxNI, mn));
+    const __m128 d = _mm_sub_ps(mx, mnSafe);
+    alignas(16) float dArr[4];
+    _mm_store_ps(dArr, d);
+    alignas(16) float adjArr[4];
+    adjArr[0] = log2OnePlusPow2NegApproxF(dArr[0]);
+    adjArr[1] = log2OnePlusPow2NegApproxF(dArr[1]);
+    adjArr[2] = log2OnePlusPow2NegApproxF(dArr[2]);
+    adjArr[3] = log2OnePlusPow2NegApproxF(dArr[3]);
+    const __m128 sum = _mm_add_ps(mx, _mm_load_ps(adjArr));
+    // Both-NEG_INF lanes -> NEG_INF; otherwise sum.
+    return _mm_or_ps(_mm_and_ps(isMxNI, niV), _mm_andnot_ps(isMxNI, sum));
+}
+#endif
+
 static inline void log2AccExactAdd(double x, bool &has, double &maxVal, double &scaledSum) {
     if (!has) {
         maxVal = x;
@@ -855,6 +939,18 @@ static double parseInfernalAsciiProb(const std::string &tok, double nullProb) {
     return std::exp2(bits) * nullProb;
 }
 
+static CmNodeType parseCmNodeType(const std::string &tok) {
+    if (tok == "ROOT") return CM_ND_ROOT;
+    if (tok == "MATP") return CM_ND_MATP;
+    if (tok == "MATL") return CM_ND_MATL;
+    if (tok == "MATR") return CM_ND_MATR;
+    if (tok == "BEGL") return CM_ND_BEGL;
+    if (tok == "BEGR") return CM_ND_BEGR;
+    if (tok == "BIF")  return CM_ND_BIF;
+    if (tok == "END")  return CM_ND_END;
+    return CM_ND_UNKNOWN;
+}
+
 static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, const std::string &srcLabel) {
     int clen = -1;
     int statesN = -1;
@@ -863,6 +959,9 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
     bool done = false;
     int curMapL = -1;
     int curMapR = -1;
+    int curNodeIdx = -1;
+    CmNodeType curNodeType = CM_ND_UNKNOWN;
+    bool nodeChanged = false;
     InfernalExactModel m;
 
     std::vector<CmState> states;
@@ -894,6 +993,15 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
                 hs >> m.null3Omega;
             } else if (key == "N2OMEGA") {
                 hs >> m.null2Omega;
+            } else if (key == "PBEGIN") {
+                hs >> m.pBegin;
+                m.hasLocalCfg = true;
+            } else if (key == "PEND") {
+                hs >> m.pEnd;
+                m.hasLocalCfg = true;
+            } else if (key == "ELSELF") {
+                hs >> m.elSelf;
+                m.hasLocalCfg = true;
             } else if (key == "NULL") {
                 const double nullBase = 0.25;
                 std::string tok0, tok1, tok2, tok3;
@@ -941,7 +1049,9 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
             std::string ntype;
             int nidx = -1;
             ns >> ntype >> nidx;
-            (void) nidx;
+            curNodeType = parseCmNodeType(ntype);
+            curNodeIdx = nidx;
+            nodeChanged = true;
             std::stringstream aft(line.substr(close + 1));
             std::vector<std::string> toks;
             std::string tok;
@@ -988,6 +1098,10 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
         s.cnum = cnum;
         s.mapLeft = curMapL;
         s.mapRight = curMapR;
+        s.nodeIdx = curNodeIdx;
+        s.nodeType = curNodeType;
+        s.isFirstOfNode = nodeChanged;
+        nodeChanged = false;
 
         int off = 10;
         if (s.type != CM_ST_B && cnum > 0) {
@@ -1033,6 +1147,94 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
     m.w = w;
     m.states = states;
     m.rootState = 0;
+
+    // cm_localize: with PBEGIN > 0, identify begin-eligible heads (first state of
+    // MATP/MATL/MATR/BIF nodes); with PEND > 0, identify end-eligible heads (first
+    // state of MATP/MATL/MATR/BEGL/BEGR nodes whose successor node is not END).
+    // Rescale the head's outgoing transitions in linear space by 1/(1+end_lin) and
+    // populate beginSc/endSc as log2 probabilities.
+    // Gated on MMSEQS_CMSCAN_LOCAL_MODE=1 (default off). Although Infernal cmsearch
+    // is local by default, our local pickup is currently a post-fill pass (EL-state
+    // contributions don't propagate up via the parent CYK recurrence). Until that's
+    // interleaved into the per-state fill loop, enabling local-by-default produces
+    // worse alignments than pure glocal (mean -0.075 AUC on 9-query bench, 9-May).
+    {
+        const char *env = std::getenv("MMSEQS_CMSCAN_LOCAL_MODE");
+        const bool enableLocalMode = (env != NULL && std::string(env) == "1");
+        if (!enableLocalMode) {
+            m.hasLocalCfg = false;
+        }
+    }
+    if (m.hasLocalCfg) {
+        // Map from nodeIdx -> {firstStateIdx, nodeType, nextNodeType}
+        int maxNode = -1;
+        for (const CmState &s : m.states) {
+            if (s.nodeIdx > maxNode) maxNode = s.nodeIdx;
+        }
+        std::vector<int> firstOfNode(static_cast<size_t>(maxNode + 2), -1);
+        std::vector<CmNodeType> nodeTypes(static_cast<size_t>(maxNode + 2), CM_ND_UNKNOWN);
+        for (const CmState &s : m.states) {
+            if (s.nodeIdx >= 0 && s.isFirstOfNode) {
+                firstOfNode[static_cast<size_t>(s.nodeIdx)] = s.idx;
+                nodeTypes[static_cast<size_t>(s.nodeIdx)] = s.nodeType;
+            }
+        }
+
+        // Begin-eligible: first state of MATP/MATL/MATR/BIF nodes (excluding node 0).
+        // End-eligible:   first state of MATP/MATL/MATR/BEGL/BEGR nodes whose
+        //                 successor node is not END (node index >0 and < maxNode).
+        std::vector<int> beginHeads;
+        std::vector<int> endHeads;
+        for (int n = 1; n <= maxNode; ++n) {
+            const CmNodeType nt = nodeTypes[static_cast<size_t>(n)];
+            const int head = firstOfNode[static_cast<size_t>(n)];
+            if (head < 0) continue;
+            if (nt == CM_ND_MATP || nt == CM_ND_MATL || nt == CM_ND_MATR || nt == CM_ND_BIF) {
+                beginHeads.push_back(head);
+            }
+            if (nt == CM_ND_MATP || nt == CM_ND_MATL || nt == CM_ND_MATR ||
+                nt == CM_ND_BEGL || nt == CM_ND_BEGR) {
+                CmNodeType nextNt = (n + 1 <= maxNode) ? nodeTypes[static_cast<size_t>(n + 1)]
+                                                       : CM_ND_END;
+                if (nextNt != CM_ND_END) {
+                    endHeads.push_back(head);
+                }
+            }
+        }
+
+        const double LOG2 = std::log(2.0);
+        if (m.pBegin > 0.0 && !beginHeads.empty()) {
+            const double begLin = m.pBegin / static_cast<double>(beginHeads.size());
+            const double begLog = std::log(begLin) / LOG2;
+            for (int h : beginHeads) {
+                m.states[static_cast<size_t>(h)].beginSc = begLog;
+            }
+        }
+        if (m.pEnd > 0.0 && !endHeads.empty()) {
+            const double endLin = m.pEnd / static_cast<double>(endHeads.size());
+            // After cm_localize: t[v]_new[i] = t[v]_old[i] / (1 + endLin),
+            //                    end[v]      = endLin / (1 + endLin).
+            // In log2 space that is a uniform offset of -log2(1 + endLin) added to
+            // existing transition log probabilities, and endSc = log2(endLin/(1+endLin)).
+            const double scaleLog = -std::log(1.0 + endLin) / LOG2;
+            const double endLog = std::log(endLin / (1.0 + endLin)) / LOG2;
+            for (int h : endHeads) {
+                CmState &s = m.states[static_cast<size_t>(h)];
+                for (size_t k = 0; k < s.trans.size(); ++k) {
+                    if (s.trans[k] != NEG_INF) {
+                        s.trans[k] += scaleLog;
+                    }
+                }
+                s.endSc = endLog;
+            }
+        }
+        Debug(Debug::INFO) << "Infernal CM local cfg: PBEGIN=" << m.pBegin
+                           << " PEND=" << m.pEnd
+                           << " ELSELF=" << m.elSelf
+                           << " beginHeads=" << beginHeads.size()
+                           << " endHeads=" << endHeads.size() << "\n";
+    }
+
     Debug(Debug::INFO) << "Infernal CM exact parser: CLEN=" << m.clen
                        << " W=" << m.w
                        << " states=" << m.states.size() << "\n";
@@ -1098,6 +1300,15 @@ struct Hit {
     float precomputedSeqId = -1.0f; // trace-based pid, <0 means fall back to score-per-col estimate
     std::string cigar;
     std::string traceStates;
+    // Query-coord alignment span derived from CIGAR (with --hand: consensus
+    // col c == query position c-1). qStart/qEnd are 0-indexed; cigarAlnLen is
+    // the total CIGAR op count (M+D+I) in MMseqs convention. Negative qStart
+    // means "not populated; fall back to legacy emit".
+    int qStart = -1;
+    int qEnd = -1;
+    unsigned int cigarAlnLen = 0;
+    int leadingInsertTargets = 0;
+    int trailingInsertTargets = 0;
 };
 
 static inline char traceOpForState(CmStateType t) {
@@ -1215,7 +1426,27 @@ static std::string buildConsensusFromExactModel(const InfernalExactModel &model)
     return cons;
 }
 
-static std::string modelTraceCigar(const InfernalExactModel &model, const std::vector<int> &traceStates) {
+// Build a query-coord MMseqs CIGAR from the CYK trace.
+// With cmbuild --hand + all-'x' RF, consensus column c maps 1:1 to query
+// position c-1, so per-column ops are query-coord directly. MMseqs convention:
+//   M = match (consumes 1 query, 1 target)
+//   D = consumes 1 query, 0 target  -> CM delete state at column
+//   I = consumes 0 query, 1 target  -> CM insert state between columns
+// We trim to firstMatchCol..lastMatchCol so leading/trailing delete-only
+// columns (which are walked by truncated CYK but are not really "covered")
+// don't inflate the alignment span. outQStart/outQEnd are 0-indexed query
+// positions; outAlnLen is the total number of CIGAR ops (M+D+I).
+static std::string modelTraceCigarQueryCoord(const InfernalExactModel &model,
+                                             const std::vector<int> &traceStates,
+                                             int *outQStart, int *outQEnd,
+                                             int *outAlnLen,
+                                             int *outLeadingInsertTargets,
+                                             int *outTrailingInsertTargets) {
+    if (outQStart) *outQStart = -1;
+    if (outQEnd) *outQEnd = -1;
+    if (outAlnLen) *outAlnLen = 0;
+    if (outLeadingInsertTargets) *outLeadingInsertTargets = 0;
+    if (outTrailingInsertTargets) *outTrailingInsertTargets = 0;
     if (traceStates.empty()) {
         return "NA";
     }
@@ -1239,8 +1470,15 @@ static std::string modelTraceCigar(const InfernalExactModel &model, const std::v
     if (maxMap <= 0 || minMap == std::numeric_limits<int>::max()) {
         return "NA";
     }
-    std::vector<char> mop(static_cast<size_t>(maxMap + 1), '\0'); // raw map coordinate space
+    std::vector<char> mop(static_cast<size_t>(maxMap + 1), '\0');
     std::vector<int> insAfter(static_cast<size_t>(maxMap + 1), 0);
+    // ROOT_IL anchors before col 1 (mapLeft==0) and ROOT_IR anchors after col
+    // CLEN (mapRight==CLEN+1==maxMap+1). They consume target residues but
+    // don't fit in insAfter[1..maxMap]; bin them here so they get attributed
+    // to leading/trailing inserts below — otherwise dbEnd-dbStart+1 exceeds
+    // the CIGAR's M+I and downstream walkers (result2dnamsa) overshoot.
+    int prefixIns = 0;
+    int suffixIns = 0;
     for (size_t i = 0; i < traceStates.size(); ++i) {
         const int sid = traceStates[i];
         if (sid < 0 || sid >= static_cast<int>(model.states.size())) {
@@ -1269,26 +1507,72 @@ static std::string modelTraceCigar(const InfernalExactModel &model, const std::v
             if (s.mapRight > 0 && s.mapRight <= maxMap && mop[static_cast<size_t>(s.mapRight)] == '\0') {
                 mop[static_cast<size_t>(s.mapRight)] = 'D';
             }
-        } else if (s.type == CM_ST_IL || s.type == CM_ST_IR) {
-            int anchor = (s.mapLeft > 0) ? s.mapLeft : s.mapRight;
-            if (anchor > 0 && anchor <= maxMap) {
+        } else if (s.type == CM_ST_IL) {
+            // IL inserts AFTER its left consensus column. ROOT_IL has mapLeft==0
+            // and conceptually inserts before col 1 → bin as prefix.
+            int anchor = s.mapLeft;
+            if (anchor <= 0) {
+                prefixIns += 1;
+            } else if (anchor > maxMap) {
+                suffixIns += 1;
+            } else {
+                insAfter[static_cast<size_t>(anchor)] += 1;
+            }
+        } else if (s.type == CM_ST_IR) {
+            // IR inserts BEFORE its right consensus column → anchor at mapRight-1.
+            // ROOT_IR has mapRight==CLEN+1 (=maxMap+1) so anchor==maxMap (valid).
+            int anchor = (s.mapRight > 0) ? s.mapRight - 1 : 0;
+            if (anchor <= 0) {
+                prefixIns += 1;
+            } else if (anchor > maxMap) {
+                suffixIns += 1;
+            } else {
                 insAfter[static_cast<size_t>(anchor)] += 1;
             }
         }
     }
-    std::string ops;
-    ops.reserve(static_cast<size_t>((maxMap - minMap + 1) + 32));
-    for (int p = minMap; p <= maxMap; ++p) {
-        if (mop[static_cast<size_t>(p)] == '\0') {
-            mop[static_cast<size_t>(p)] = 'D'; // unset consensus position = gap in target
-        }
-        const char o = (mop[static_cast<size_t>(p)] == 'D') ? 'I' : 'M';
-        ops.push_back(o);
-        const int ins = insAfter[static_cast<size_t>(p)];
-        for (int k = 0; k < ins; ++k) {
-            ops.push_back('D');
+    int firstM = 0;
+    int lastM = 0;
+    for (int p = 1; p <= maxMap; ++p) {
+        if (mop[static_cast<size_t>(p)] == 'M') {
+            if (firstM == 0) firstM = p;
+            lastM = p;
         }
     }
+    if (firstM == 0) {
+        // No match-state coverage; fall back to whole-trace span so callers can
+        // still report something rather than failing silently.
+        firstM = std::max(1, minMap);
+        lastM = maxMap;
+    }
+    // Count target residues consumed by inserts that fall outside the
+    // [firstM, lastM] window, so the caller can shrink dbStart/dbEnd to align
+    // with the trimmed CIGAR. Insert states with anchor < firstM consumed
+    // target before the alignment region; anchor > lastM consumed after.
+    int leadingIns = prefixIns;
+    int trailingIns = suffixIns;
+    for (int p = 1; p < firstM && p <= maxMap; ++p) {
+        leadingIns += insAfter[static_cast<size_t>(p)];
+    }
+    for (int p = lastM + 1; p <= maxMap; ++p) {
+        trailingIns += insAfter[static_cast<size_t>(p)];
+    }
+    if (outLeadingInsertTargets) *outLeadingInsertTargets = leadingIns;
+    if (outTrailingInsertTargets) *outTrailingInsertTargets = trailingIns;
+    std::string ops;
+    ops.reserve(static_cast<size_t>(lastM - firstM + 1) + 32);
+    for (int p = firstM; p <= lastM; ++p) {
+        char c = mop[static_cast<size_t>(p)];
+        if (c == '\0') c = 'D'; // unwalked column inside hit envelope = query gap
+        ops.push_back((c == 'M') ? 'M' : 'D');
+        const int ins = insAfter[static_cast<size_t>(p)];
+        for (int k = 0; k < ins; ++k) {
+            ops.push_back('I');
+        }
+    }
+    if (outQStart) *outQStart = firstM - 1;
+    if (outQEnd) *outQEnd = lastM - 1;
+    if (outAlnLen) *outAlnLen = static_cast<int>(ops.size());
     return rleTraceOps(ops);
 }
 
@@ -1490,12 +1774,14 @@ static float seqIdFromCigarConsensus(const std::string &cigar,
                 }
             }
         } else if (op == 'I') {
-            const size_t step = std::min(cnt, consensus.size() - std::min(iCon, consensus.size()));
-            iCon += step;
-            denom += step;
-        } else if (op == 'D') {
+            // MMseqs convention: I = target-only (gap on query) → advance observed.
             const size_t step = std::min(cnt, observed.size() - std::min(iObs, observed.size()));
             iObs += step;
+            denom += step;
+        } else if (op == 'D') {
+            // MMseqs convention: D = query-only (gap on target) → advance consensus.
+            const size_t step = std::min(cnt, consensus.size() - std::min(iCon, consensus.size()));
+            iCon += step;
             denom += step;
         }
     }
@@ -1700,6 +1986,11 @@ static void exactTraceRec(ExactRecCtx &ctx,
             kBeg = std::max(kBeg, i + (d - st.splitRMax) - 1);
             kEnd = std::min(kEnd, i + (d - st.splitRMin) - 1);
         }
+        // Always pick argmax over the enumerated split range. Earlier code
+        // tried a tolerance-match early-exit on `best - cand` < 1e-6, but
+        // cand is recomputed from float-rounded chart cells while best is the
+        // float chart value cast to double; on ties or near-ties the early
+        // match could pick a non-optimal k.
         int bestK = -1;
         double bestApprox = NEG_INF;
         for (int k = kBeg; k <= kEnd; ++k) {
@@ -1712,11 +2003,6 @@ static void exactTraceRec(ExactRecCtx &ctx,
             if (cand > bestApprox) {
                 bestApprox = cand;
                 bestK = k;
-            }
-            if (std::fabs(best - cand) < 1e-6) {
-                exactTraceRec(ctx, y, i, k, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-                exactTraceRec(ctx, z, k + 1, j, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-                return;
             }
         }
         if (bestK >= 0) {
@@ -1755,83 +2041,29 @@ static void exactTraceRec(ExactRecCtx &ctx,
     modelAggRaw[2] += st.null2Agg[2];
     modelAggRaw[3] += st.null2Agg[3];
     const double e = cmStateEmitScoreFast(st, *ctx.seqCode, i, j);
+    // Pick argmax over all children. The previous tolerance-match early-exit
+    // could short-circuit on a non-optimal child when float chart rounding
+    // pushed cand within 1e-6 of best for a sub-optimal transition. Always
+    // enumerating is essentially free here — trace runs once per hit while
+    // fill runs O(M*N²) per target.
     int bestY = -1;
     double bestApprox = NEG_INF;
-    if (st.trCount == 1) {
-        const int y = static_cast<int>(st.trDst4[0]);
-        const double nxt = exactVitRec(ctx, y, ni, nj);
-        if (nxt != NEG_INF) {
-            bestApprox = e + st.trSc4[0] + nxt;
-            bestY = y;
-        }
-        if (nxt != NEG_INF && std::fabs(best - (e + st.trSc4[0] + nxt)) < 1e-6) {
-            exactTraceRec(ctx, y, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-    } else if (st.trCount == 2) {
-        const int y0 = static_cast<int>(st.trDst4[0]);
-        const double nxt0 = exactVitRec(ctx, y0, ni, nj);
-        if (nxt0 != NEG_INF) {
-            const double cand0 = e + st.trSc4[0] + nxt0;
-            if (cand0 > bestApprox) { bestApprox = cand0; bestY = y0; }
-        }
-        if (nxt0 != NEG_INF && std::fabs(best - (e + st.trSc4[0] + nxt0)) < 1e-6) {
-            exactTraceRec(ctx, y0, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-        const int y1 = static_cast<int>(st.trDst4[1]);
-        const double nxt1 = exactVitRec(ctx, y1, ni, nj);
-        if (nxt1 != NEG_INF) {
-            const double cand1 = e + st.trSc4[1] + nxt1;
-            if (cand1 > bestApprox) { bestApprox = cand1; bestY = y1; }
-        }
-        if (nxt1 != NEG_INF && std::fabs(best - (e + st.trSc4[1] + nxt1)) < 1e-6) {
-            exactTraceRec(ctx, y1, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-    } else if (st.trCount == 4) {
-        const int y0 = static_cast<int>(st.trDst4[0]);
-        const double nxt0 = exactVitRec(ctx, y0, ni, nj);
-        if (nxt0 != NEG_INF) {
-            const double cand0 = e + st.trSc4[0] + nxt0;
-            if (cand0 > bestApprox) { bestApprox = cand0; bestY = y0; }
-        }
-        if (nxt0 != NEG_INF && std::fabs(best - (e + st.trSc4[0] + nxt0)) < 1e-6) {
-            exactTraceRec(ctx, y0, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-        const int y1 = static_cast<int>(st.trDst4[1]);
-        const double nxt1 = exactVitRec(ctx, y1, ni, nj);
-        if (nxt1 != NEG_INF) {
-            const double cand1 = e + st.trSc4[1] + nxt1;
-            if (cand1 > bestApprox) { bestApprox = cand1; bestY = y1; }
-        }
-        if (nxt1 != NEG_INF && std::fabs(best - (e + st.trSc4[1] + nxt1)) < 1e-6) {
-            exactTraceRec(ctx, y1, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-        const int y2 = static_cast<int>(st.trDst4[2]);
-        const double nxt2 = exactVitRec(ctx, y2, ni, nj);
-        if (nxt2 != NEG_INF) {
-            const double cand2 = e + st.trSc4[2] + nxt2;
-            if (cand2 > bestApprox) { bestApprox = cand2; bestY = y2; }
-        }
-        if (nxt2 != NEG_INF && std::fabs(best - (e + st.trSc4[2] + nxt2)) < 1e-6) {
-            exactTraceRec(ctx, y2, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
-        }
-        const int y3 = static_cast<int>(st.trDst4[3]);
-        const double nxt3 = exactVitRec(ctx, y3, ni, nj);
-        if (nxt3 != NEG_INF) {
-            const double cand3 = e + st.trSc4[3] + nxt3;
-            if (cand3 > bestApprox) { bestApprox = cand3; bestY = y3; }
-        }
-        if (nxt3 != NEG_INF && std::fabs(best - (e + st.trSc4[3] + nxt3)) < 1e-6) {
-            exactTraceRec(ctx, y3, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-            return;
+    const int trCount = st.trCount;
+    if (trCount <= 4) {
+        for (int t = 0; t < trCount; ++t) {
+            const int y = static_cast<int>(st.trDst4[t]);
+            const double nxt = exactVitRec(ctx, y, ni, nj);
+            if (nxt == NEG_INF) {
+                continue;
+            }
+            const double cand = e + st.trSc4[t] + nxt;
+            if (cand > bestApprox) {
+                bestApprox = cand;
+                bestY = y;
+            }
         }
     } else {
-        for (int t = 0; t < st.trCount; ++t) {
+        for (int t = 0; t < trCount; ++t) {
             const size_t ti = st.trOff + static_cast<size_t>(t);
             const int y = ctx.trDst[ti];
             const double nxt = exactVitRec(ctx, y, ni, nj);
@@ -1843,12 +2075,9 @@ static void exactTraceRec(ExactRecCtx &ctx,
                 bestApprox = cand;
                 bestY = y;
             }
-            if (std::fabs(best - cand) < 1e-6) {
-                exactTraceRec(ctx, y, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
-                return;
-            }
         }
     }
+    (void)best;  // best is no longer needed; argmax over enumerated cands suffices.
     if (bestY >= 0) {
         exactTraceRec(ctx, bestY, ni, nj, minUsed, maxUsed, obsCount, modelAggRaw, traceOps, traceStates);
     }
@@ -1859,7 +2088,9 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                                  bool wantInside,
                                  std::vector<Hit> &outHits,
                                  const std::string &seqId,
-                                 int maxHitLen = 0) {
+                                 int maxHitLen = 0,
+                                 int forcedI = -1,
+                                 int forcedD = -1) {
     const int N = static_cast<int>(seq.size());
     const int M = static_cast<int>(model.states.size());
     if (N <= 0 || M <= 0) {
@@ -1931,7 +2162,11 @@ static void runInfernalExactScan(const InfernalExactModel &model,
         (model.nullProb[2] > 0.0) ? std::log2(model.nullProb[2]) : NEG_INF,
         (model.nullProb[3] > 0.0) ? std::log2(model.nullProb[3]) : NEG_INF
     };
+    const bool null3Enabled = cmNull3Enabled();
     auto null3CorrByInterval = [&](int i, int j) -> double {
+        if (!null3Enabled) {
+            return 0.0;
+        }
         const int cntA = prefA[static_cast<size_t>(j)] - prefA[static_cast<size_t>(i - 1)];
         const int cntC = prefC[static_cast<size_t>(j)] - prefC[static_cast<size_t>(i - 1)];
         const int cntG = prefG[static_cast<size_t>(j)] - prefG[static_cast<size_t>(i - 1)];
@@ -2423,8 +2658,96 @@ static void runInfernalExactScan(const InfernalExactModel &model,
         }
 
         const int root = model.rootState;
+
+        // Local-end pickup (Infernal cm_dpsearch.c). After regular CYK fills
+        // alpha[v][d][i] for end-eligible head v, take a max with the local-end
+        // candidate: emit_v(i, d) + el_scA[d - sd_v] + endSc[v], where
+        // el_scA[k] = elSelf * k. Emission must be included because state v
+        // emits its M-state residue(s) before transitioning to EL.
+        if (model.hasLocalCfg && model.elSelf <= 0.0) {
+            const float elSelfF = static_cast<float>(model.elSelf);
+            const int8_t *sc = ws.seqCode.data();
+            for (int v = 0; v < M; ++v) {
+                const CmState &cs = model.states[static_cast<size_t>(v)];
+                if (cs.endSc == NEG_INF) continue;
+                const float endScF = static_cast<float>(cs.endSc);
+                const size_t vBase = stateBase[static_cast<size_t>(v)];
+                const size_t vi = static_cast<size_t>(v);
+                const float *ep = nbEmitPtr[vi];
+                const int emitSize = nbEmitSize[vi];
+                const uint8_t consumeMask = nbConsumeMask[vi];
+                int sd = 0;
+                if (cs.type == CM_ST_MP) sd = 2;
+                else if (cs.type == CM_ST_ML || cs.type == CM_ST_MR) sd = 1;
+                else if (cs.type == CM_ST_S) sd = 0;
+                else continue;  // only MP/ML/MR/S are end-eligible heads
+                for (int d = sd; d <= N; ++d) {
+                    const float elContrib = elSelfF * static_cast<float>(d - sd) + endScF;
+                    const int iMax = (d == 0) ? (N + 1) : (N - d + 1);
+                    float *row = &vit[vBase + static_cast<size_t>(d) * iStride + 1];
+                    for (int ii = 0; ii < iMax; ++ii) {
+                        const int i = ii + 1;
+                        float ef;
+                        if (consumeMask == 0u) {
+                            ef = 0.0f;
+                        } else if (consumeMask == 1u) {
+                            const int li = sc[i];
+                            if (li < 0) continue;
+                            ef = (ep && emitSize >= 4) ? ep[li] : -1.0f;
+                        } else if (consumeMask == 2u) {
+                            const int ri = sc[i + d - 1];
+                            if (ri < 0) continue;
+                            ef = (ep && emitSize >= 4) ? ep[ri] : -1.0f;
+                        } else {
+                            const int li = sc[i];
+                            const int ri = sc[i + d - 1];
+                            if (li < 0 || ri < 0) continue;
+                            ef = (ep && emitSize >= 16) ? ep[li * 4 + ri] : -1.0f;
+                        }
+                        const float cand = ef + elContrib;
+                        if (row[ii] < cand) row[ii] = cand;
+                    }
+                }
+            }
+        }
+
+        // Local-begin pass (Infernal cm_dpsearch.c:576-610). After all states
+        // are filled, the root cell can also be reached by jumping directly to
+        // any begin-eligible state y at score `alpha[y][d][i] + beginSc[y]`.
+        // We *add* these alternatives on top of the regular ROOT_S recurrence
+        // (we do not zero ROOT_S transitions); this is more permissive than
+        // Infernal's cm_localize (which zeros root transitions) but cannot make
+        // any cell worse. Glocal CMs leave beginSc=NEG_INF and skip this loop.
+        if (model.hasLocalCfg) {
+            const size_t rootBaseLB = stateBase[static_cast<size_t>(root)];
+            for (int y = 1; y < M; ++y) {
+                const CmState &cs = model.states[static_cast<size_t>(y)];
+                if (cs.beginSc == NEG_INF) {
+                    continue;
+                }
+                const float bsc = static_cast<float>(cs.beginSc);
+                const size_t yBase = stateBase[static_cast<size_t>(y)];
+                for (int d = 0; d <= N; ++d) {
+                    const int iMax = (d == 0) ? (N + 1) : (N - d + 1);
+                    float *rootRow = &vit[rootBaseLB + static_cast<size_t>(d) * iStride + 1];
+                    const float *yRow = &vit[yBase + static_cast<size_t>(d) * iStride + 1];
+                    for (int i = 0; i < iMax; ++i) {
+                        const float cand = yRow[i] + bsc;
+                        if (rootRow[i] < cand) rootRow[i] = cand;
+                    }
+                }
+            }
+        }
+
         int maxSpan = N;
-        if (model.w > 0) {
+        // Fix A diagnostic: W cap can be disabled via MMSEQS_CMSCAN_WCAP=0 to
+        // probe whether Infernal-length envelopes (d > W) become reachable.
+        static int wcapMode = -1;
+        if (wcapMode == -1) {
+            const char *env = std::getenv("MMSEQS_CMSCAN_WCAP");
+            wcapMode = (env != NULL && std::string(env) == "0") ? 0 : 1;
+        }
+        if (wcapMode == 1 && model.w > 0) {
             maxSpan = std::min(maxSpan, model.w);
         }
         if (maxHitLen > 0) {
@@ -2432,6 +2755,31 @@ static void runInfernalExactScan(const InfernalExactModel &model,
         }
         // Infernal semantics evaluate all legal spans under state dmin/dmax/w constraints.
         int minSpan = 1;
+        // Fix B: optional CLEN-relative envelope floor. MMSEQS_CMSCAN_DMIN_CLEN_FRAC=0.9
+        // forces d >= 0.9*CLEN to match Infernal's tight envelope distribution and prevent
+        // the DP from clipping useful columns on divergent targets (e.g. 2YGH_1 KJ798010.1).
+        {
+            static double dminFrac = -1.0;
+            if (dminFrac < 0.0) {
+                const char *env = std::getenv("MMSEQS_CMSCAN_DMIN_CLEN_FRAC");
+                dminFrac = (env != NULL) ? std::atof(env) : 0.0;
+                if (dminFrac < 0.0 || dminFrac > 1.0) dminFrac = 0.0;
+            }
+            if (dminFrac > 0.0 && model.clen > 0) {
+                int floorD = static_cast<int>(dminFrac * model.clen);
+                if (floorD > minSpan) minSpan = floorD;
+                if (minSpan > maxSpan) minSpan = maxSpan; // never invert
+            }
+        }
+        // Fix B: force prefilter envelope. When forcedI/forcedD are valid,
+        // collapse the (i, d) search to that single cell so trace matches
+        // the prefilter's HMM-Forward-equivalent envelope.
+        const bool forceEnv = (forcedI > 0 && forcedD > 0 &&
+                               forcedD <= N && forcedI <= N - forcedD + 1);
+        if (forceEnv) {
+            minSpan = forcedD;
+            maxSpan = forcedD;
+        }
         float bestSc = NEG_INF_F;
         int bestI = 1;
         int bestD = N;
@@ -2443,9 +2791,22 @@ static void runInfernalExactScan(const InfernalExactModel &model,
         int bestDL = N, bestDR = N, bestDT = N;
         double bestLCorr = 0.0, bestRCorr = 0.0, bestTCorr = 0.0;
         const size_t rootBase = stateBase[static_cast<size_t>(root)];
+        // Diagnostic: when MMSEQS_CMSCAN_DUMP_TID matches seqId, dump the score landscape.
+        const char *dumpTid = std::getenv("MMSEQS_CMSCAN_DUMP_TID");
+        const bool dumpThisTarget = (dumpTid != NULL && seqId == dumpTid);
+        if (dumpThisTarget) {
+            fprintf(stderr, "DUMP_HEADER tid=%s N=%d M=%d maxSpan=%d minSpan=%d truncModes=%d\n",
+                    seqId.c_str(), N, M, maxSpan, minSpan, enableTruncModes ? 1 : 0);
+        }
+        // Per-d best raw and corrected scores, for diagnostic dump.
+        std::vector<float> dBestRaw(static_cast<size_t>(maxSpan + 1), NEG_INF_F);
+        std::vector<float> dBestSc(static_cast<size_t>(maxSpan + 1), NEG_INF_F);
+        std::vector<int> dBestI(static_cast<size_t>(maxSpan + 1), -1);
         for (int d = minSpan; d <= maxSpan; ++d) {
             const int iMax = N - d + 1;
-            for (int i = 1; i <= iMax; ++i) {
+            int iLo = 1, iHi = iMax;
+            if (forceEnv) { iLo = forcedI; iHi = forcedI; }
+            for (int i = iLo; i <= iHi; ++i) {
                 const float rawSc = vit[rootBase + static_cast<size_t>(d) * iStride + static_cast<size_t>(i)];
                 if (rawSc == NEG_INF_F) {
                     continue;
@@ -2455,11 +2816,17 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                 const bool mayImproveL = enableTruncModes && j == N && rawSc > bestL;
                 const bool mayImproveR = enableTruncModes && i == 1 && rawSc > bestR;
                 const bool mayImproveT = enableTruncModes && i == 1 && j == N && rawSc > bestT;
-                if (!(mayImproveJ || mayImproveL || mayImproveR || mayImproveT)) {
+                const bool dumpCell = dumpThisTarget && rawSc > dBestRaw[static_cast<size_t>(d)];
+                if (!(mayImproveJ || mayImproveL || mayImproveR || mayImproveT) && !dumpCell) {
                     continue;
                 }
                 const double corr = null3CorrByInterval(i, j);
                 const float sc = static_cast<float>(static_cast<double>(rawSc) - corr);
+                if (dumpCell) {
+                    dBestRaw[static_cast<size_t>(d)] = rawSc;
+                    dBestSc[static_cast<size_t>(d)] = sc;
+                    dBestI[static_cast<size_t>(d)] = i;
+                }
                 if (mayImproveJ && sc > bestSc) {
                     bestSc = sc;
                     bestI = i;
@@ -2512,6 +2879,76 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                 bestNull3Corr = bestTCorr;
             }
         }
+        // MMSEQS_CMSCAN_FORCE_GLOBAL=1: force trace to start at (i=1, d=min(N, maxSpan)),
+        //   i.e. full envelope alignment from position 1. Worst for envelopes where the
+        //   conserved core sits at i>1.
+        // MMSEQS_CMSCAN_FORCE_GLOBAL=2: pin d=min(N, maxSpan), pick i = argmax alpha[ROOT_S][d][i].
+        //   Full-length subspan, but slid to wherever score is best — handles 4LCK_3-style
+        //   envelopes where the conserved region is not at i=1.
+        {
+            static int forceGlobal = -1;
+            if (forceGlobal == -1) {
+                const char *env = std::getenv("MMSEQS_CMSCAN_FORCE_GLOBAL");
+                if (env != NULL) {
+                    if (std::string(env) == "1") forceGlobal = 1;
+                    else if (std::string(env) == "2") forceGlobal = 2;
+                    else forceGlobal = 0;
+                } else {
+                    forceGlobal = 0;
+                }
+            }
+            if (forceGlobal == 1) {
+                const int gD = std::min(maxSpan, N);
+                const int gI = 1;
+                if (gD >= minSpan && gI + gD - 1 <= N) {
+                    const float gSc = vit[rootBase + static_cast<size_t>(gD) * iStride + static_cast<size_t>(gI)];
+                    if (gSc != NEG_INF_F) {
+                        const double corr = null3CorrByInterval(gI, gI + gD - 1);
+                        bestSc = static_cast<float>(static_cast<double>(gSc) - corr);
+                        bestI = gI;
+                        bestD = gD;
+                        bestMode = 'T';
+                        bestNull3Corr = corr;
+                    }
+                }
+            } else if (forceGlobal == 2) {
+                const int gD = std::min(maxSpan, N);
+                if (gD >= minSpan) {
+                    int bestIglob = -1;
+                    float bestScGlob = NEG_INF_F;
+                    double bestCorrGlob = 0.0;
+                    const int iMax = N - gD + 1;
+                    for (int gI = 1; gI <= iMax; ++gI) {
+                        const float raw = vit[rootBase + static_cast<size_t>(gD) * iStride + static_cast<size_t>(gI)];
+                        if (raw == NEG_INF_F) continue;
+                        const double corr = null3CorrByInterval(gI, gI + gD - 1);
+                        const float sc = static_cast<float>(static_cast<double>(raw) - corr);
+                        if (sc > bestScGlob) {
+                            bestScGlob = sc;
+                            bestIglob = gI;
+                            bestCorrGlob = corr;
+                        }
+                    }
+                    if (bestIglob > 0) {
+                        bestSc = bestScGlob;
+                        bestI = bestIglob;
+                        bestD = gD;
+                        bestMode = 'T';
+                        bestNull3Corr = bestCorrGlob;
+                    }
+                }
+            }
+        }
+        if (dumpThisTarget) {
+            fprintf(stderr, "DUMP_BEST tid=%s bestI=%d bestD=%d bestSc=%.4f bestMode=%c null3Corr=%.4f\n",
+                    seqId.c_str(), bestI, bestD, bestSc, bestMode, bestNull3Corr);
+            for (int d = minSpan; d <= maxSpan; ++d) {
+                if (dBestRaw[static_cast<size_t>(d)] == NEG_INF_F) continue;
+                fprintf(stderr, "DUMP_D tid=%s d=%d bestI=%d rawSc=%.4f sc=%.4f\n",
+                        seqId.c_str(), d, dBestI[static_cast<size_t>(d)],
+                        dBestRaw[static_cast<size_t>(d)], dBestSc[static_cast<size_t>(d)]);
+            }
+        }
         if (bestSc == NEG_INF_F) {
             return;
         }
@@ -2548,7 +2985,9 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                 const size_t vd = static_cast<size_t>(c.v) * static_cast<size_t>(N + 1) + static_cast<size_t>(c.d);
                 const int kBeg = bSplitBegByVD[vd];
                 const int kEnd = bSplitEndByVD[vd];
-                bool found = false;
+                // Argmax over the split range. l + r is computed in float to
+                // mirror fill's `_mm_max_ps`/`std::fmaxf` reduction order, so
+                // ties resolve identically.
                 int bestK = -1;
                 float bestApprox = NEG_INF_F;
                 for (int k = kBeg; k <= kEnd; ++k) {
@@ -2566,14 +3005,8 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                         bestApprox = cand;
                         bestK = k;
                     }
-                    if (std::fabs(cur - (l + r)) < 1e-6) {
-                        st.push_back(TbCell{z, c.i + k, c.d - k});
-                        st.push_back(TbCell{y, c.i, k});
-                        found = true;
-                        break;
-                    }
                 }
-                if (!found && bestK >= 0) {
+                if (bestK >= 0) {
                     st.push_back(TbCell{z, c.i + bestK, c.d - bestK});
                     st.push_back(TbCell{y, c.i, bestK});
                 }
@@ -2616,110 +3049,48 @@ static void runInfernalExactScan(const InfernalExactModel &model,
             }
             const int nd = c.d - consume;
             const double e = cmStateEmitScoreFast(sv, ws.seqCode, c.i, j);
+            const float ef = static_cast<float>(e);
             const size_t ndBase = static_cast<size_t>(nd) * iStride + static_cast<size_t>(ni);
-            bool pushedNext = false;
+            // Argmax over children. Candidate is computed in float as
+            // `(ef + trF) + n` to mirror fill's left-associative SIMD/scalar
+            // arithmetic exactly, so trace and fill agree on tie-breaks.
+            // Replaces a tolerance-match early-exit (`|cur - cand| < 1e-6`)
+            // that could short-circuit on a non-optimal child when float
+            // rounding pushed an inferior candidate within the tolerance.
             int bestY = -1;
             float bestCand = NEG_INF_F;
-            if (sv.trCount == 1) {
-                const int y = sv.trDst4[0];
-                const float n = vit[stateBase[static_cast<size_t>(y)] + ndBase];
-                if (n != NEG_INF_F) {
-                    const float cand = static_cast<float>(e + sv.trSc4[0] + n);
-                    bestCand = cand;
-                    bestY = y;
-                }
-                if (n != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[0] + n)) < 1e-6) {
-                    st.push_back(TbCell{y, ni, nd});
-                    pushedNext = true;
-                }
-            } else if (sv.trCount == 2) {
-                const int y0 = sv.trDst4[0];
-                const float n0 = vit[stateBase[static_cast<size_t>(y0)] + ndBase];
-                if (n0 != NEG_INF_F) {
-                    const float cand0 = static_cast<float>(e + sv.trSc4[0] + n0);
-                    if (cand0 > bestCand) { bestCand = cand0; bestY = y0; }
-                }
-                if (n0 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[0] + n0)) < 1e-6) {
-                    st.push_back(TbCell{y0, ni, nd});
-                    pushedNext = true;
-                } else {
-                    const int y1 = sv.trDst4[1];
-                    const float n1 = vit[stateBase[static_cast<size_t>(y1)] + ndBase];
-                    if (n1 != NEG_INF_F) {
-                        const float cand1 = static_cast<float>(e + sv.trSc4[1] + n1);
-                        if (cand1 > bestCand) { bestCand = cand1; bestY = y1; }
-                    }
-                    if (n1 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[1] + n1)) < 1e-6) {
-                        st.push_back(TbCell{y1, ni, nd});
-                        pushedNext = true;
-                    }
-                }
-            } else if (sv.trCount == 4) {
-                const int y0 = sv.trDst4[0];
-                const float n0 = vit[stateBase[static_cast<size_t>(y0)] + ndBase];
-                if (n0 != NEG_INF_F) {
-                    const float cand0 = static_cast<float>(e + sv.trSc4[0] + n0);
-                    if (cand0 > bestCand) { bestCand = cand0; bestY = y0; }
-                }
-                if (n0 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[0] + n0)) < 1e-6) {
-                    st.push_back(TbCell{y0, ni, nd});
-                    pushedNext = true;
-                } else {
-                    const int y1 = sv.trDst4[1];
-                    const float n1 = vit[stateBase[static_cast<size_t>(y1)] + ndBase];
-                    if (n1 != NEG_INF_F) {
-                        const float cand1 = static_cast<float>(e + sv.trSc4[1] + n1);
-                        if (cand1 > bestCand) { bestCand = cand1; bestY = y1; }
-                    }
-                    if (n1 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[1] + n1)) < 1e-6) {
-                        st.push_back(TbCell{y1, ni, nd});
-                        pushedNext = true;
-                    } else {
-                        const int y2 = sv.trDst4[2];
-                        const float n2 = vit[stateBase[static_cast<size_t>(y2)] + ndBase];
-                        if (n2 != NEG_INF_F) {
-                            const float cand2 = static_cast<float>(e + sv.trSc4[2] + n2);
-                            if (cand2 > bestCand) { bestCand = cand2; bestY = y2; }
-                        }
-                        if (n2 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[2] + n2)) < 1e-6) {
-                            st.push_back(TbCell{y2, ni, nd});
-                            pushedNext = true;
-                        } else {
-                            const int y3 = sv.trDst4[3];
-                            const float n3 = vit[stateBase[static_cast<size_t>(y3)] + ndBase];
-                            if (n3 != NEG_INF_F) {
-                                const float cand3 = static_cast<float>(e + sv.trSc4[3] + n3);
-                                if (cand3 > bestCand) { bestCand = cand3; bestY = y3; }
-                            }
-                            if (n3 != NEG_INF_F && std::fabs(cur - (e + sv.trSc4[3] + n3)) < 1e-6) {
-                                st.push_back(TbCell{y3, ni, nd});
-                                pushedNext = true;
-                            }
-                        }
-                    }
-                }
-            } else {
-                for (int t = 0; t < sv.trCount; ++t) {
-                    const size_t ti = sv.trOff + static_cast<size_t>(t);
-                    const int y = trDst[ti];
-                    const double tr = trSc[ti];
+            const int trCount = sv.trCount;
+            if (trCount <= 4) {
+                for (int t = 0; t < trCount; ++t) {
+                    const int y = sv.trDst4[t];
                     const float n = vit[stateBase[static_cast<size_t>(y)] + ndBase];
                     if (n == NEG_INF_F) {
                         continue;
                     }
-                    const float cand = static_cast<float>(e + tr + n);
+                    const float cand = (ef + sv.trScF4[t]) + n;
                     if (cand > bestCand) {
                         bestCand = cand;
                         bestY = y;
                     }
-                    if (std::fabs(cur - (e + tr + n)) < 1e-6) {
-                        st.push_back(TbCell{y, ni, nd});
-                        pushedNext = true;
-                        break;
+                }
+            } else {
+                for (int t = 0; t < trCount; ++t) {
+                    const size_t ti = sv.trOff + static_cast<size_t>(t);
+                    const int y = trDst[ti];
+                    const float trF = static_cast<float>(trSc[ti]);
+                    const float n = vit[stateBase[static_cast<size_t>(y)] + ndBase];
+                    if (n == NEG_INF_F) {
+                        continue;
+                    }
+                    const float cand = (ef + trF) + n;
+                    if (cand > bestCand) {
+                        bestCand = cand;
+                        bestY = y;
                     }
                 }
             }
-            if (!pushedNext && bestY >= 0) {
+            (void)cur;  // cur is only used for the NEG_INF_F early-skip above.
+            if (bestY >= 0) {
                 st.push_back(TbCell{bestY, ni, nd});
             }
         }
@@ -2734,9 +3105,17 @@ static void runInfernalExactScan(const InfernalExactModel &model,
         h.end1 = maxUsed;
         h.mode = bestMode;
         h.trunc = (bestMode != 'J');
-        h.cigar = rleTraceOps(traceOps);
         h.traceStates = encodeTraceStates(traceStates);
-        h.cigar = modelTraceCigar(model, traceStates);
+        {
+            int qS = -1, qE = -1, aL = 0, leadIns = 0, trailIns = 0;
+            h.cigar = modelTraceCigarQueryCoord(model, traceStates, &qS, &qE, &aL,
+                                                &leadIns, &trailIns);
+            h.qStart = qS;
+            h.qEnd = qE;
+            h.cigarAlnLen = static_cast<unsigned int>(std::max(0, aL));
+            h.leadingInsertTargets = leadIns;
+            h.trailingInsertTargets = trailIns;
+        }
         const double null2Corr = scoreCorrectionNull2BitsFromTrace(model, modelAggRaw, obsCount);
         h.cyk = static_cast<double>(bestSc) - null2Corr;
         if (wantInside) {
@@ -3008,6 +3387,15 @@ static void runInfernalExactScan(const InfernalExactModel &model,
     recCtx.chartBandSize = bandSize.data();
     // Infernal semantics evaluate all legal spans under state dmin/dmax/w constraints.
     int minSpan = 1;
+    // Fix B: force prefilter envelope on memoized path too (same as fast path).
+    // Only enable if forcedD fits within the chart bands already allocated.
+    const bool forceEnv2 = (forcedI > 0 && forcedD > 0 &&
+                            forcedD <= N && forcedI <= N - forcedD + 1 &&
+                            forcedD <= maxSpan);
+    if (forceEnv2) {
+        minSpan = forcedD;
+        maxSpan = forcedD;
+    }
     double bestSc = NEG_INF;
     int bestI = 1;
     int bestJ = N;
@@ -3020,7 +3408,9 @@ static void runInfernalExactScan(const InfernalExactModel &model,
     double bestLCorr = 0.0, bestRCorr = 0.0, bestTCorr = 0.0;
     for (int d = minSpan; d <= maxSpan; ++d) {
         const int iMax = N - d + 1;
-        for (int i = 1; i <= iMax; ++i) {
+        int iLo = 1, iHi = iMax;
+        if (forceEnv2) { iLo = forcedI; iHi = forcedI; }
+        for (int i = iLo; i <= iHi; ++i) {
             const int j = i + d - 1;
             const double rawSc = exactVitRec(recCtx, model.rootState, i, j);
             if (rawSc == NEG_INF) {
@@ -3111,9 +3501,17 @@ static void runInfernalExactScan(const InfernalExactModel &model,
     h.end1 = maxUsed;
     h.mode = bestMode;
     h.trunc = (bestMode != 'J');
-    h.cigar = rleTraceOps(traceOps);
     h.traceStates = encodeTraceStates(traceStates);
-    h.cigar = modelTraceCigar(model, traceStates);
+    {
+        int qS = -1, qE = -1, aL = 0, leadIns = 0, trailIns = 0;
+        h.cigar = modelTraceCigarQueryCoord(model, traceStates, &qS, &qE, &aL,
+                                            &leadIns, &trailIns);
+        h.qStart = qS;
+        h.qEnd = qE;
+        h.cigarAlnLen = static_cast<unsigned int>(std::max(0, aL));
+        h.leadingInsertTargets = leadIns;
+        h.trailingInsertTargets = trailIns;
+    }
     const double null2Corr = scoreCorrectionNull2BitsFromTrace(model, modelAggRaw, obsCount);
     h.cyk = bestSc - null2Corr;
     if (wantInside) {
@@ -3350,16 +3748,10 @@ int cmscan(int argc, const char **argv, const Command &command) {
     }
 
     size_t totalHits = 0;
-#pragma omp parallel num_threads(static_cast<int>(nThreads)) reduction(+:totalHits)
-{
-    unsigned int thread_idx = 0;
-#ifdef OPENMP
-    thread_idx = static_cast<unsigned int>(omp_get_thread_num());
-#endif
     char buffer[1024 + 32768 * 4];
-    Sequence seqObjLocal(seqDbr.getMaxSeqLen(), Parameters::DBTYPE_NUCLEOTIDES, &nucMat, 0, false, false);
-
-    #pragma omp for schedule(dynamic, 1)
+    // Outer per-query loop is serial; inner parallelism is over candidate
+    // target lines (Phase 2 below). The 9-query rRNA bench has only 1 query,
+    // so per-query parallelism wastes 15/16 threads on the slow CYK step.
     for (long qi = 0; qi < static_cast<long>(queryRefs.size()); ++qi) {
         const QueryModelRef &ref = queryRefs[qi];
 
@@ -3367,7 +3759,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
         QueryModel qm;
         if (ref.dbIdx != SIZE_MAX && cmReader != NULL) {
             qm.key = ref.key;
-            const char *raw = cmReader->getData(ref.dbIdx, thread_idx);
+            const char *raw = cmReader->getData(ref.dbIdx, 0);
             size_t len = cmReader->getEntryLen(ref.dbIdx);
             std::string text(raw, len);
             const size_t nul = text.find('\0');
@@ -3400,7 +3792,6 @@ int cmscan(int argc, const char **argv, const Command &command) {
 
         std::vector<Hit> hits;
         hits.reserve(1024);
-        std::unordered_set<unsigned int> seen;
 
         // Finalize each scanned hit: remap strand-specific coords to forward,
         // promote Inside -> primary score when Infernal-default, compute
@@ -3446,11 +3837,25 @@ int cmscan(int argc, const char **argv, const Command &command) {
             }
         };
 
-        // Stream per-target: read one candidate line at a time, decode the
-        // target, scan fwd+rev, finalize, accumulate into `hits`.
+        // Phase 1: walk the per-query candidate list once (sequential),
+        // parsing prefilter coords and deduping by target key. This is cheap
+        // (just integer parsing + hash insert) so single-threaded is fine.
+        struct Cand {
+            unsigned int tKey;
+            int dbStart;
+            int dbEnd;
+            int qStart;
+            int qEnd;
+            bool hasRegionCoord;
+            bool prefilterIsRev;
+        };
+        std::vector<Cand> cands;
+        cands.reserve(1024);
+        std::unordered_set<unsigned int> seen;
+
         const size_t rid = resultReader.getId(qm.key);
         if (rid != UINT_MAX) {
-            char *data = resultReader.getData(rid, thread_idx);
+            char *data = resultReader.getData(rid, 0);
             while (*data != '\0') {
                 while (*data == ' ' || *data == '\t') {
                     ++data;
@@ -3470,9 +3875,8 @@ int cmscan(int argc, const char **argv, const Command &command) {
                     continue;
                 }
 
-                bool hasRegionCoord = false;
-                bool prefilterIsRev = false;
-                int dbStart = 0, dbEnd = 0, qStart = 0, qEnd = 0;
+                Cand cand{};
+                cand.tKey = tKey;
                 if (*endptr == '\t') {
                     const char *p = endptr;
                     int col = 1;
@@ -3486,18 +3890,42 @@ int cmscan(int argc, const char **argv, const Command &command) {
                         p++;
                     }
                     if (col >= 10 && colStart[4] && colStart[5] && colStart[7] && colStart[8]) {
-                        dbStart = Util::fast_atoi<int>(colStart[7]);
-                        dbEnd = Util::fast_atoi<int>(colStart[8]);
-                        // mmseqs convention: dbStart > dbEnd means minus strand.
-                        prefilterIsRev = (dbStart > dbEnd);
-                        if (prefilterIsRev) std::swap(dbStart, dbEnd);
-                        qStart = Util::fast_atoi<int>(colStart[4]);
-                        qEnd = Util::fast_atoi<int>(colStart[5]);
-                        if (qStart > qEnd) std::swap(qStart, qEnd);
-                        hasRegionCoord = true;
+                        cand.dbStart = Util::fast_atoi<int>(colStart[7]);
+                        cand.dbEnd   = Util::fast_atoi<int>(colStart[8]);
+                        cand.qStart  = Util::fast_atoi<int>(colStart[4]);
+                        cand.qEnd    = Util::fast_atoi<int>(colStart[5]);
+                        // mmseqs/iter3 may encode minus strand by reversing
+                        // either side. Strand is XOR of the two reversals.
+                        const bool dbRev = (cand.dbStart > cand.dbEnd);
+                        const bool qRev  = (cand.qStart > cand.qEnd);
+                        cand.prefilterIsRev = (dbRev != qRev);
+                        if (dbRev) std::swap(cand.dbStart, cand.dbEnd);
+                        if (qRev)  std::swap(cand.qStart, cand.qEnd);
+                        cand.hasRegionCoord = true;
                     }
                 }
                 data = Util::skipLine(data);
+                cands.push_back(cand);
+            }
+        }
+
+        // Phase 2: parallelize CYK across candidates. Each thread keeps a
+        // local Hit accumulator and a local Sequence buffer; the global
+        // `hits` is merged once under critical at the end.
+#pragma omp parallel num_threads(static_cast<int>(nThreads))
+        {
+            unsigned int thread_idx = 0;
+#ifdef OPENMP
+            thread_idx = static_cast<unsigned int>(omp_get_thread_num());
+#endif
+            Sequence seqObjLocal(seqDbr.getMaxSeqLen(), Parameters::DBTYPE_NUCLEOTIDES, &nucMat, 0, false, false);
+            std::vector<Hit> localHits;
+            localHits.reserve(64);
+
+#pragma omp for schedule(dynamic, 1) nowait
+            for (long ci = 0; ci < static_cast<long>(cands.size()); ++ci) {
+                const Cand &cand = cands[ci];
+                const unsigned int tKey = cand.tKey;
 
                 const size_t tId = seqDbr.getId(tKey);
                 if (tId == UINT_MAX) {
@@ -3509,50 +3937,93 @@ int cmscan(int argc, const char **argv, const Command &command) {
                 std::string regionSeq;
                 int offset = 0;
                 int maxHitLen = 0;
-                if (cmRegionFlanking > 0.0f && hasRegionCoord) {
-                    const int qAlnLen = std::max(1, qEnd - qStart + 1);
+                if (cmRegionFlanking > 0.0f && cand.hasRegionCoord) {
+                    const int qAlnLen = std::max(1, cand.qEnd - cand.qStart + 1);
                     const int flank = static_cast<int>(cmRegionFlanking * qAlnLen);
                     const int sLen = static_cast<int>(fs.seq.size());
-                    const int regStart = std::max(0, dbStart - flank);
-                    const int regEnd = std::min(sLen, dbEnd + flank + 1);
+                    const int regStart = std::max(0, cand.dbStart - flank);
+                    const int regEnd = std::min(sLen, cand.dbEnd + flank + 1);
                     regionSeq = fs.seq.substr(static_cast<size_t>(regStart),
                                               static_cast<size_t>(regEnd - regStart));
                     offset = regStart;
                 } else {
                     regionSeq = fs.seq;
                 }
-                if (hasRegionCoord) {
-                    const int dbSpan = std::max(1, dbEnd - dbStart + 1);
+                if (cand.hasRegionCoord) {
+                    const int dbSpan = std::max(1, cand.dbEnd - cand.dbStart + 1);
                     maxHitLen = std::max(dbSpan * CM_MAXSPAN_ENV_SLACK, clenFloor);
                 } else if (clenFloor > 0) {
                     maxHitLen = clenFloor;
                 }
+                {
+                    const char *dumpTid = std::getenv("MMSEQS_CMSCAN_DUMP_TID");
+                    if (dumpTid != NULL && fs.id == dumpTid) {
+                        fprintf(stderr, "DUMP_REGION tid=%s dbStart=%d dbEnd=%d offset=%d regLen=%d maxHitLen=%d clenFloor=%d strand=%c\n",
+                                fs.id.c_str(), cand.dbStart, cand.dbEnd, offset,
+                                static_cast<int>(regionSeq.size()), maxHitLen, clenFloor,
+                                cand.hasRegionCoord ? '+' : '?');
+                    }
+                }
 
                 // If the prefilter already disambiguated strand (hasRegionCoord),
                 // scan only that strand. Fall back to both strands otherwise.
-                const bool scanFwd = !hasRegionCoord || !prefilterIsRev;
-                const bool scanRev = !hasRegionCoord ||  prefilterIsRev;
+                const bool scanFwd = !cand.hasRegionCoord || !cand.prefilterIsRev;
+                const bool scanRev = !cand.hasRegionCoord ||  cand.prefilterIsRev;
+                // Fix B: thread prefilter envelope into CYK as a forced (i, d).
+                // Hypothesis under test: cells inside the prefilter envelope produce
+                // Infernal-quality alignment columns when the DP is forbidden from
+                // shrinking d. Enabled only when MMSEQS_CMSCAN_FORCE_PREFILTER_ENV=1
+                // and the candidate has a prefilter region coord.
+                int forceI = -1, forceD = -1;
+                {
+                    static int forcePrefilter = -1;
+                    if (forcePrefilter == -1) {
+                        const char *env = std::getenv("MMSEQS_CMSCAN_FORCE_PREFILTER_ENV");
+                        forcePrefilter = (env != NULL && std::string(env) == "1") ? 1 : 0;
+                    }
+                    if (forcePrefilter == 1 && cand.hasRegionCoord) {
+                        forceI = (cand.dbStart - offset) + 1;       // 1-indexed in regionSeq
+                        forceD = std::max(1, cand.dbEnd - cand.dbStart + 1);
+                    }
+                }
                 std::vector<Hit> fwdHits, revHits;
                 if (scanFwd) {
-                    runInfernalExactScan(qm.exactModel, regionSeq, wantInside, fwdHits, fs.id, maxHitLen);
+                    runInfernalExactScan(qm.exactModel, regionSeq, wantInside, fwdHits, fs.id,
+                                         maxHitLen, forceI, forceD);
                 }
                 if (scanRev) {
                     const std::string revSeq = reverseComplement(regionSeq);
-                    runInfernalExactScan(qm.exactModel, revSeq, wantInside, revHits, fs.id, maxHitLen);
+                    int revForceI = -1, revForceD = -1;
+                    if (forceI > 0 && forceD > 0) {
+                        const int M_local = static_cast<int>(regionSeq.size());
+                        // Forward [forceI..forceI+forceD-1] maps to revcomp
+                        // [M-forceI-forceD+2..M-forceI+1].
+                        revForceI = M_local - forceI - forceD + 2;
+                        revForceD = forceD;
+                    }
+                    runInfernalExactScan(qm.exactModel, revSeq, wantInside, revHits, fs.id,
+                                         maxHitLen, revForceI, revForceD);
                 }
 
                 const unsigned int fullLen = static_cast<unsigned int>(fs.seq.size());
                 const int regionLen = static_cast<int>(regionSeq.size());
                 for (Hit &h : fwdHits) {
                     finalizeHit(h, +1, fs.seq, tKey, fullLen, offset, regionLen);
-                    hits.emplace_back(std::move(h));
+                    localHits.emplace_back(std::move(h));
                 }
                 for (Hit &h : revHits) {
                     finalizeHit(h, -1, fs.seq, tKey, fullLen, offset, regionLen);
-                    hits.emplace_back(std::move(h));
+                    localHits.emplace_back(std::move(h));
                 }
             }
-        }
+
+#pragma omp critical
+            {
+                hits.insert(hits.end(),
+                            std::make_move_iterator(localHits.begin()),
+                            std::make_move_iterator(localHits.end()));
+            }
+        } // end inner omp parallel
 
         std::sort(hits.begin(), hits.end(), [](const Hit &a, const Hit &b) {
             if (a.dbKey != b.dbKey) return a.dbKey < b.dbKey;
@@ -3564,20 +4035,66 @@ int cmscan(int argc, const char **argv, const Command &command) {
         const unsigned int modelLen = static_cast<unsigned int>(std::max(0, qm.exactModel.clen));
 
         // Stream the per-query result block to the writer one hit at a time.
-        resultWriter.writeStart(thread_idx);
+        // Outer loop is sequential, so always use thread slot 0.
+        resultWriter.writeStart(0);
         for (size_t i = 0; i < hits.size(); ++i) {
             const Hit &h = hits[i];
-            const int dbStartOut = std::max(0, h.start1 - 1);
-            const int dbEndOut = std::max(0, h.end1 - 1);
-            const unsigned int alnLen = static_cast<unsigned int>(std::max(1, dbEndOut - dbStartOut + 1));
-            const unsigned int qLen = (modelLen > 0) ? modelLen : alnLen;
-            const int qStartOut = 0;
-            const int qEndOut = static_cast<int>(std::min(qLen, alnLen)) - 1;
-            const float qcov = (qLen > 0) ? static_cast<float>(alnLen) / static_cast<float>(qLen) : 0.0f;
-            const float dbcov = (h.dbLen > 0) ? static_cast<float>(alnLen) / static_cast<float>(h.dbLen) : 0.0f;
+            // Trim db range by inserts that fall outside the [firstM,lastM]
+            // CIGAR window: those leading/trailing insert-state target
+            // residues are not part of the reported alignment region.
+            // For reverse-strand hits finalizeHit produces start1 > end1
+            // (Infernal convention), so the trim direction flips.
+            const int rawDbStart = std::max(0, h.start1 - 1);
+            const int rawDbEnd = std::max(0, h.end1 - 1);
+            int dbStartOut, dbEndOut;
+            if (rawDbStart <= rawDbEnd) {
+                dbStartOut = std::min(rawDbEnd,
+                                      rawDbStart + h.leadingInsertTargets);
+                dbEndOut = std::max(dbStartOut,
+                                    rawDbEnd - h.trailingInsertTargets);
+            } else {
+                dbStartOut = std::max(rawDbEnd,
+                                      rawDbStart - h.leadingInsertTargets);
+                dbEndOut = std::min(dbStartOut,
+                                    rawDbEnd + h.trailingInsertTargets);
+            }
+            // qLen = real query sequence length. With cmbuild --hand we
+            // ensured CM clen == qLen so modelLen is the right value.
+            const unsigned int qLen = (modelLen > 0)
+                ? modelLen
+                : static_cast<unsigned int>(std::max(1, dbEndOut - dbStartOut + 1));
+            // qStart/qEnd come from the trace's first/last match-state column
+            // (0-indexed query coord). Fall back to a degenerate full span if
+            // the trace produced no match states.
+            int qStartOut = (h.qStart >= 0) ? h.qStart : 0;
+            int qEndOut = (h.qEnd >= 0) ? h.qEnd
+                                        : static_cast<int>(qLen) - 1;
+            if (qEndOut < qStartOut) qEndOut = qStartOut;
+            // alnLen is total CIGAR ops (M+D+I) — the canonical MMseqs view.
+            const unsigned int alnLen = (h.cigarAlnLen > 0)
+                ? h.cigarAlnLen
+                : static_cast<unsigned int>(std::max(1, dbEndOut - dbStartOut + 1));
+            const unsigned int qSpan = static_cast<unsigned int>(qEndOut - qStartOut + 1);
+            const unsigned int dbSpan = static_cast<unsigned int>(std::max(1, std::abs(dbEndOut - dbStartOut) + 1));
+            const float qcov = (qLen > 0) ? static_cast<float>(qSpan) / static_cast<float>(qLen) : 0.0f;
+            const float dbcov = (h.dbLen > 0) ? static_cast<float>(dbSpan) / static_cast<float>(h.dbLen) : 0.0f;
             const int bitScore = static_cast<int>(std::lrint(h.cyk));
             const double evalue = h.hasEvalue ? h.evalue : 1.0;
             const bool hasBacktrace = (!h.cigar.empty() && h.cigar != "NA");
+            // CmScan internal CIGAR convention: I = target-consume (insert state), D = query-consume
+            // (consensus column with target gap). MMseqs/result2*msa convention is the opposite:
+            // I = query-consume, D = target-consume. Swap I<->D once at the emit boundary so the
+            // serialized result_t carries the canonical convention; internal helpers
+            // (seqIdFromCigarConsensus, etc.) keep their original interpretation.
+            std::string emitCigar;
+            if (hasBacktrace) {
+                emitCigar.reserve(h.cigar.size());
+                for (char c : h.cigar) {
+                    if (c == 'I') emitCigar.push_back('D');
+                    else if (c == 'D') emitCigar.push_back('I');
+                    else emitCigar.push_back(c);
+                }
+            }
             float seqIdVal = h.precomputedSeqId;
             if (seqIdVal < 0.0f) {
                 const unsigned int bitScorePos = static_cast<unsigned int>(std::max(0, bitScore));
@@ -3598,13 +4115,12 @@ int cmscan(int argc, const char **argv, const Command &command) {
                                   dbStartOut,
                                   dbEndOut,
                                   h.dbLen,
-                                  hasBacktrace ? h.cigar : std::string());
+                                  hasBacktrace ? emitCigar : std::string());
             const size_t len = Matcher::resultToBuffer(buffer, res, hasBacktrace, false);
-            resultWriter.writeAdd(buffer, len, thread_idx);
+            resultWriter.writeAdd(buffer, len, 0);
         }
-        resultWriter.writeEnd(qm.key, thread_idx);
+        resultWriter.writeEnd(qm.key, 0);
     }
-} // end omp parallel
     resultWriter.close();
     resultReader.close();
 
