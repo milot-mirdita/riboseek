@@ -4,6 +4,8 @@
 #include <algorithm>
 #include <vector>
 #include <string>
+#include <ostream>
+#include <cuda_runtime.h>
 
 namespace cudasw4{
 
@@ -44,6 +46,17 @@ namespace cudasw4{
             << " " << data.dpx << " " << int(data.approach);
         return os;
     }
+
+    typedef std::vector<GaplessKernelConfig> (*GaplessFilterConfigFn)(
+        std::vector<GaplessKernelConfig>& configs,
+        int maxSharedMemoryPerBlock
+    );
+
+    struct GaplessFilterConfig {
+        GaplessFilterConfigFn filterConfigFn;
+    };
+
+    extern std::vector<GaplessFilterConfig> gaplessFilterConfigs;
     
 
     //T4
@@ -358,6 +371,13 @@ namespace cudasw4{
             configs = getOptimalKernelConfigs_gapless_sm121();
         }else{
             configs = getOptimalKernelConfigs_gapless_default();
+        }
+
+        // Apply filter configs if any. There should be only one filter config.
+        if (!gaplessFilterConfigs.empty()){
+            int maxSharedMemoryPerBlock = 0;
+            cudaDeviceGetAttribute(&maxSharedMemoryPerBlock, cudaDevAttrMaxSharedMemoryPerBlock, deviceId);
+            configs = gaplessFilterConfigs[0].filterConfigFn(configs, maxSharedMemoryPerBlock);
         }
 
         return configs;

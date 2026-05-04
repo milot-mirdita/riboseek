@@ -2,6 +2,9 @@
 #define MARV_H
 
 #include <vector>
+#include "gapless_kernel_config.cuh"
+
+void registerGaplessFilterConfig(cudasw4::GaplessFilterConfigFn filterConfigFn);
 
 class Marv {
 public:

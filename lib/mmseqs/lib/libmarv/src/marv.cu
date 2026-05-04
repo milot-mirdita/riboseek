@@ -13,6 +13,13 @@ namespace b64 {
 }
 #include "marv.h"
 
+namespace cudasw4 {
+    std::vector<GaplessFilterConfig> gaplessFilterConfigs;
+}
+
+void registerGaplessFilterConfig(cudasw4::GaplessFilterConfigFn filterConfigFn) {
+    cudasw4::gaplessFilterConfigs.push_back({filterConfigFn});
+}
 
 size_t getMaxTempBytes(int maxSubjectLength) {
     int deviceId = 0;

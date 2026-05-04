@@ -15,4 +15,8 @@ const unsigned char* getDinucToNucTable();
 // Uses the raw sequence data (seq->seqData) to re-encode with (prev, curr) pairing.
 void dinucEncodeReverse(Sequence *seq);
 
+#ifdef HAVE_CUDA
+void registerDinucleotideFilterConfig();
+#endif
+
 #endif
