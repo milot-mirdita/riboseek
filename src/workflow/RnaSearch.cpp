@@ -18,10 +18,11 @@ static void setRnaSearchDefaults(Parameters *p) {
     p->sensitivity = 7.5;
     p->evalThr = 0.001;
     p->evalProfile = 0.1;
+    p->searchType = Parameters::SEARCH_TYPE_NUCLEOTIDES;
     // Match old mmseqs pipeline defaults for dinucleotide search
     p->gapOpen = MultiParam<NuclAA<int>>(NuclAA<int>(23, 23));
     p->gapExtend = MultiParam<NuclAA<int>>(NuclAA<int>(1, 1));
-    p->pca = MultiParam<PseudoCounts>(PseudoCounts(1.3, 1.3));
+    p->pca = MultiParam<PseudoCounts>(PseudoCounts(1.1, 1.1));
     p->pcb = MultiParam<PseudoCounts>(PseudoCounts(1.8, 1.8));
     p->maskProfile = 0;
     if (p->PARAM_MAX_SEQ_LEN.wasSet == false) {
@@ -71,6 +72,7 @@ int rnasearch(int argc, const char **argv, const Command &command) {
     cmd.addVariable("VERBOSITY", par.createParameterString(par.onlyverbosity).c_str());
     cmd.addVariable("THREADS_COMP_PAR", par.createParameterString(par.threadsandcompression).c_str());
     cmd.addVariable("VERB_COMP_PAR", par.createParameterString(par.verbandcompression).c_str());
+    cmd.addVariable("GPU", par.gpu ? "TRUE" : NULL);
 
     // RNA always uses rnaalign
     cmd.addVariable("ALIGN_MODULE", "rnaalign");
@@ -138,7 +140,11 @@ int rnasearch(int argc, const char **argv, const Command &command) {
     for (int i = 0; i < par.numIterations; i++) {
         // Match old MMseqs2 nucl-nucl iterative search: realign disabled across
         // all iterations (Search.cpp lines 511-518 in the forked MMseqs2).
-        par.realign = false;
+	if (i == 0) {
+            par.realign = true;
+	} else {
+            par.realign = false;
+	}
 
         if (i == (par.numIterations - 1)) {
             par.evalThr = originalEval;

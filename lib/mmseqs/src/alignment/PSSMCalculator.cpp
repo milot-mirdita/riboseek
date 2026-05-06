@@ -297,7 +297,7 @@ void PSSMCalculator::computeLogPSSM(BaseMatrix *subMat, char *pssm, const float 
                     backgroundProbsSum += subMat->pBack[i];
                     profileProbsSum += profile[pos * Sequence::PROFILE_AA_SIZE + i];
                 }
-                pssmVal = bitFactor * MathUtil::flog2(profileProbsSum / backgroundProbsSum) + bitFactor * scoreBias;
+                pssmVal = bitFactor * (MathUtil::flog2(profileProbsSum / backgroundProbsSum) - 2) + bitFactor * scoreBias;
                 // switch (aa) {
                 //     case 16: pssmVal = (fPssm[1] + fPssm[5] + fPssm[9] + fPssm[13]) / 4.0f; break;
                 //     case 17: pssmVal = (fPssm[2] + fPssm[4] + fPssm[8] + fPssm[14]) / 4.0f; break;

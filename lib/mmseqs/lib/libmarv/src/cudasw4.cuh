@@ -315,7 +315,11 @@ namespace cudasw4{
                 }
         
                 d_query.resize(1024*1024); CUERR
+                #ifdef RIBOSEEK
+                gpuFullQueryPSSM.resize(10000, 25);
+                #else
                 gpuFullQueryPSSM.resize(10000, 21);
+                #endif
 
                 numTempBytes = std::min(maxTempBytes, gpumemlimit);
                 d_tempStorageHE.resize(numTempBytes);
@@ -458,7 +462,11 @@ namespace cudasw4{
                 }
         
                 d_query.resize(1024*1024); CUERR
+                #ifdef RIBOSEEK
+                gpuFullQueryPSSM.resize(10000, 25);
+                #else
                 gpuFullQueryPSSM.resize(10000, 21);
+                #endif
 
                 numTempBytes = std::min(maxTempBytes, gpumemlimit);
                 d_tempStorageHE.resize(numTempBytes);
@@ -1286,6 +1294,64 @@ namespace cudasw4{
                 gpuStreams.emplace_back();
                 gpuEvents.emplace_back(cudaEventDisableTiming);
             }
+
+            /////////////////////////////////////////////////////////////////////////
+            // Anton Vorontsov's code
+            // Probe P2P access and verify it actually works for each non-master GPU.
+            // Some hardware/driver combinations report P2P as available but silently
+            // fail to transfer data, so we do a test copy with known values.
+            canPeerCopyToMaster.resize(numGpus, false);
+            canPeerCopyToMaster[0] = true;
+            for(int i = 1; i < numGpus; i++){
+                if(deviceIds[i] == deviceIds[0]){
+                    canPeerCopyToMaster[i] = true;
+                    continue;
+                }
+                int canAccess = 0;
+                cudaDeviceCanAccessPeer(&canAccess, deviceIds[0], deviceIds[i]); CUERR;
+                if(!canAccess) continue;
+
+                cudaSetDevice(deviceIds[0]); CUERR;
+                cudaError_t err = cudaDeviceEnablePeerAccess(deviceIds[i], 0);
+                if(err != cudaSuccess && err != cudaErrorPeerAccessAlreadyEnabled) continue;
+                if(err == cudaErrorPeerAccessAlreadyEnabled) cudaGetLastError();
+
+                // Verify with a test copy: write known pattern on source, peer-copy to master, read back
+                constexpr int testN = 4;
+                const float testPattern[testN] = {1.0f, 2.0f, 3.0f, 4.0f};
+                float *d_src = nullptr, *d_dst = nullptr;
+                float readback[testN] = {0};
+
+                cudaSetDevice(deviceIds[i]); CUERR;
+                cudaMalloc(&d_src, testN * sizeof(float)); CUERR;
+                cudaMemcpy(d_src, testPattern, testN * sizeof(float), cudaMemcpyHostToDevice); CUERR;
+
+                cudaSetDevice(deviceIds[0]); CUERR;
+                cudaMalloc(&d_dst, testN * sizeof(float)); CUERR;
+                cudaMemset(d_dst, 0, testN * sizeof(float)); CUERR;
+
+                cudaMemcpyPeerAsync(d_dst, deviceIds[0], d_src, deviceIds[i],
+                    testN * sizeof(float), gpuStreams[0]); CUERR;
+                cudaStreamSynchronize(gpuStreams[0]); CUERR;
+
+                cudaMemcpy(readback, d_dst, testN * sizeof(float), cudaMemcpyDeviceToHost); CUERR;
+
+                bool ok = true;
+                for(int k = 0; k < testN; k++){
+                    if(readback[k] != testPattern[k]){ ok = false; break; }
+                }
+                canPeerCopyToMaster[i] = ok;
+                if(!ok){
+                    std::cout << "WARNING: P2P copy from GPU " << deviceIds[i]
+                              << " to GPU " << deviceIds[0]
+                              << " silently fails despite cudaDeviceCanAccessPeer=1."
+                              << " Using host-staged transfers as workaround.\n";
+                }
+
+                cudaSetDevice(deviceIds[i]); cudaFree(d_src);
+                cudaSetDevice(deviceIds[0]); cudaFree(d_dst);
+            }
+            /////////////////////////////////////////////////////////////////////////
         }
 
         void makeReady(){
@@ -1862,7 +1928,11 @@ namespace cudasw4{
                 if(precomputedPssmOpt.has_value()){
                     const int8_t* precomputedPssm = precomputedPssmOpt.value();
                     if(precomputedPssm == nullptr) throw std::runtime_error("setQuery pssm is nullptr");
+                    #ifdef RIBOSEEK
+                    return PSSM::fromPSSM(queryView.ptr, queryView.length, precomputedPssm, 25);
+                    #else
                     return PSSM::fromPSSM(queryView.ptr, queryView.length, precomputedPssm, 21);
+                    #endif
                 }else{
                     if constexpr(QueryView::isEncoded){
                         return PSSM::fromBlosum(blosumType, queryView.ptr, queryView.length);
@@ -1892,7 +1962,11 @@ namespace cudasw4{
                 cudaSetDevice(deviceIds[gpu]); CUERR;
                 auto& ws = *workingSets[gpu];
                 ws.d_query.resize(currentQueryLengthWithPadding);
+                #ifdef RIBOSEEK
+                cudaMemsetAsync(ws.d_query.data() + currentQueryLength, 24, currentQueryLengthWithPadding - currentQueryLength, gpuStreams[gpu]);
+                #else
                 cudaMemsetAsync(ws.d_query.data() + currentQueryLength, 20, currentQueryLengthWithPadding - currentQueryLength, gpuStreams[gpu]);
+                #endif
                 cudaMemcpyAsync(ws.d_query.data(), queryView.ptr, currentQueryLength, cudaMemcpyDefault, gpuStreams[gpu]); CUERR
 
                 if constexpr(!QueryView::isEncoded){
@@ -2008,6 +2082,59 @@ namespace cudasw4{
             // std::exit(0);
         }
 
+        /////////////////////////////////////////////////////////////////////////
+        // Anton Vorontsov's code
+        struct CopySpec {
+            void* dst;
+            const void* src;
+            size_t bytes;
+        };
+
+        // Copy a single buffer from a non-master GPU to the master device.
+        // P2P path: cudaMemcpyPeerAsync on master stream (verified working at init).
+        // Fallback: host-staged copy via pinned buffer.
+        void copyToMasterDevice(void* masterDst, const void* srcPtr, size_t bytes, int srcGpuIndex){
+            const int masterDeviceId = deviceIds[0];
+            if(canPeerCopyToMaster[srcGpuIndex]){
+                cudaSetDevice(masterDeviceId); CUERR;
+                cudaMemcpyPeerAsync(masterDst, masterDeviceId,
+                    srcPtr, deviceIds[srcGpuIndex],
+                    bytes, gpuStreams[0]); CUERR;
+                return;
+            }
+            if(bytes > pinnedStagingBuffer.sizeInBytes()){
+                pinnedStagingBuffer.resize(bytes);
+            }
+            cudaSetDevice(deviceIds[srcGpuIndex]); CUERR;
+            cudaMemcpy(pinnedStagingBuffer.data(), srcPtr, bytes, cudaMemcpyDeviceToHost); CUERR;
+            cudaSetDevice(masterDeviceId); CUERR;
+            cudaMemcpy(masterDst, pinnedStagingBuffer.data(), bytes, cudaMemcpyHostToDevice); CUERR;
+        }
+
+        // Copy per-GPU results to the master device's combined arrays with proper event sync.
+        // Same-device: async D2D on the GPU's stream, then event+wait to master.
+        // Cross-device: event+wait first, then P2P or host-staged copy on master stream.
+        void copyGpuResultsToMaster(int gpu, cudaEvent_t forkEvent,
+                                    std::initializer_list<CopySpec> copies){
+            if(gpu == 0 || deviceIds[gpu] == deviceIds[0]){
+                for(const auto& c : copies){
+                    cudaMemcpyAsync(c.dst, c.src, c.bytes,
+                        cudaMemcpyDeviceToDevice, gpuStreams[gpu]); CUERR;
+                }
+                cudaEventRecord(forkEvent, gpuStreams[gpu]); CUERR;
+                cudaSetDevice(deviceIds[0]);
+                cudaStreamWaitEvent(gpuStreams[0], forkEvent, 0); CUERR;
+            }else{
+                cudaEventRecord(forkEvent, gpuStreams[gpu]); CUERR;
+                cudaSetDevice(deviceIds[0]);
+                cudaStreamWaitEvent(gpuStreams[0], forkEvent, 0); CUERR;
+                for(const auto& c : copies){
+                    copyToMasterDevice(c.dst, c.src, c.bytes, gpu);
+                }
+            }
+        }
+        /////////////////////////////////////////////////////////////////////////
+
         void scanDatabaseForQuery_gapless(){
             nvtx::ScopedRange sr("scanDatabaseForQuery_gapless", 0);
             const int numGpus = deviceIds.size();
@@ -2057,32 +2184,12 @@ namespace cudasw4{
                     }
                 }
 
-                cudaMemcpyAsync(
-                    d_finalAlignmentScores_allGpus.data() + results_per_query*gpu,
-                    ws.d_topN_scores.data(),
-                    sizeof(float) * results_per_query,
-                    cudaMemcpyDeviceToDevice,
-                    gpuStreams[gpu]
-                ); CUERR;
-                cudaMemcpyAsync(
-                    d_finalReferenceIds_allGpus.data() + results_per_query*gpu,
-                    ws.d_topN_refIds.data(),
-                    sizeof(ReferenceIdT) * results_per_query,
-                    cudaMemcpyDeviceToDevice,
-                    gpuStreams[gpu]
-                ); CUERR;                
-                // cudaMemcpyAsync(
-                //     d_resultNumOverflows.data() + gpu,
-                //     ws.d_total_overflow_number.data(),
-                //     sizeof(int),
-                //     cudaMemcpyDeviceToDevice,
-                //     gpuStreams[gpu]
-                // ); CUERR;                
-
-                cudaEventRecord(ws.forkStreamEvent, gpuStreams[gpu]); CUERR;
-
-                cudaSetDevice(masterDeviceId);
-                cudaStreamWaitEvent(masterStream1, ws.forkStreamEvent, 0); CUERR;
+                copyGpuResultsToMaster(gpu, ws.forkStreamEvent, {
+                    {d_finalAlignmentScores_allGpus.data() + results_per_query*gpu,
+                     ws.d_topN_scores.data(), sizeof(float) * results_per_query},
+                    {d_finalReferenceIds_allGpus.data() + results_per_query*gpu,
+                     ws.d_topN_refIds.data(), sizeof(ReferenceIdT) * results_per_query},
+                });
             }
 
             cudaSetDevice(masterDeviceId);
@@ -2198,39 +2305,14 @@ namespace cudasw4{
                         }
                     }
 
-                    cudaMemcpyAsync(
-                        d_finalAlignmentScores_allGpus.data() + results_per_query*gpu,
-                        ws.d_topN_scores.data(),
-                        sizeof(float) * results_per_query,
-                        cudaMemcpyDeviceToDevice,
-                        gpuStreams[gpu]
-                    ); CUERR;
-                    cudaMemcpyAsync(
-                        d_finalReferenceIds_allGpus.data() + results_per_query*gpu,
-                        ws.d_topN_refIds.data(),
-                        sizeof(ReferenceIdT) * results_per_query,
-                        cudaMemcpyDeviceToDevice,
-                        gpuStreams[gpu]
-                    ); CUERR;
-                    cudaMemcpyAsync(
-                        d_finalEndPositions_allGpus.data() + results_per_query*gpu,
-                        ws.d_topN_alignmentEndPositions.data(),
-                        sizeof(AlignmentEndPosition) * results_per_query,
-                        cudaMemcpyDeviceToDevice,
-                        gpuStreams[gpu]
-                    ); CUERR;  
-                    // cudaMemcpyAsync(
-                    //     d_resultNumOverflows.data() + gpu,
-                    //     ws.d_total_overflow_number.data(),
-                    //     sizeof(int),
-                    //     cudaMemcpyDeviceToDevice,
-                    //     gpuStreams[gpu]
-                    // ); CUERR;                
-
-                    cudaEventRecord(ws.forkStreamEvent, gpuStreams[gpu]); CUERR;
-
-                    cudaSetDevice(masterDeviceId);
-                    cudaStreamWaitEvent(masterStream1, ws.forkStreamEvent, 0); CUERR;
+                    copyGpuResultsToMaster(gpu, ws.forkStreamEvent, {
+                        {d_finalAlignmentScores_allGpus.data() + results_per_query*gpu,
+                         ws.d_topN_scores.data(), sizeof(float) * results_per_query},
+                        {d_finalReferenceIds_allGpus.data() + results_per_query*gpu,
+                         ws.d_topN_refIds.data(), sizeof(ReferenceIdT) * results_per_query},
+                        {d_finalEndPositions_allGpus.data() + results_per_query*gpu,
+                         ws.d_topN_alignmentEndPositions.data(), sizeof(AlignmentEndPosition) * results_per_query},
+                    });
                 }
             }else{
                 //processQueryOnGpusWithTargetSubjectIds currently does not utilize multiple gpus
@@ -4399,6 +4481,10 @@ namespace cudasw4{
         MemoryConfig memoryConfig;
         
         std::vector<int> deviceIds;
+
+        // Multi-GPU merge support: P2P flags and pinned staging buffer
+        std::vector<bool> canPeerCopyToMaster;
+        MyPinnedBuffer<char> pinnedStagingBuffer;
 
     };
 
