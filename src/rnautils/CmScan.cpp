@@ -10,6 +10,7 @@
 #include "Util.h"
 #include "NucleotideMatrix.h"
 #include "Sequence.h"
+#include "simd.h"
 
 #ifdef OPENMP
 #include <omp.h>
@@ -18,6 +19,7 @@
 #include <algorithm>
 #include <array>
 #include <cctype>
+#include <chrono>
 #include <climits>
 #include <cmath>
 #include <cstdint>
@@ -1041,11 +1043,11 @@ static inline float trEmitDegenPair(const float *esc, int Kp, int8_t bi, int8_t 
     return (float)(s / (double)n);
 }
 
-static TrCykResult runTrCYKInsideAlign(const InfernalExactModel &m,
-                                       const std::vector<int8_t> &dsq,
-                                       int L,
-                                       char preset_mode,
-                                       int pty_idx) {
+static const TrCykResult& runTrCYKInsideAlign(const InfernalExactModel &m,
+                                              const std::vector<int8_t> &dsq,
+                                              int L,
+                                              char preset_mode,
+                                              int pty_idx) {
     const float TR_IMPOSSIBLE = -1e30f;
     const int M = (int)m.states.size();
 
@@ -1059,44 +1061,67 @@ static TrCykResult runTrCYKInsideAlign(const InfernalExactModel &m,
         default:  fill_L = true;  fill_R = true;  fill_T = true;  break; // unknown
     }
 
-    TrCykResult r;
-    // Allocate (M+1) decks (extra slot for EL at v=M); j,d in [0..L].
+    // Per-thread arena. Vectors grow monotonically across calls — never shrink —
+    // so the inner float/int storage is reused. Reset overhead is just std::fill
+    // over [0..LP1) per (v, j) row, no malloc/free per envelope.
+    thread_local TrCykResult r;
+    // Reset the score-summary fields (data arrays are overwritten by reset+DP below).
+    r.score = -1e30;
+    r.mode = 'J';
+    r.b = 0;
+
     const int LP1 = L + 1;
-    auto allocAlpha = [&](std::vector<std::vector<std::vector<float>>> &a) {
-        a.assign((size_t)M + 1,
-                 std::vector<std::vector<float>>((size_t)LP1,
-                     std::vector<float>((size_t)LP1, TR_IMPOSSIBLE)));
+    auto resetAlpha = [&](std::vector<std::vector<std::vector<float>>> &a) {
+        if ((int)a.size() < M + 1) a.resize((size_t)M + 1);
+        for (int v = 0; v <= M; ++v) {
+            auto &mv = a[(size_t)v];
+            if ((int)mv.size() < LP1) mv.resize((size_t)LP1);
+            for (int j = 0; j < LP1; ++j) {
+                auto &jv = mv[(size_t)j];
+                if ((int)jv.size() < LP1) jv.resize((size_t)LP1);
+                std::fill(jv.begin(), jv.begin() + LP1, TR_IMPOSSIBLE);
+            }
+        }
     };
-    auto allocByteSh = [&](std::vector<std::vector<std::vector<int8_t>>> &a) {
-        a.assign((size_t)M + 1,
-                 std::vector<std::vector<int8_t>>((size_t)LP1,
-                     std::vector<int8_t>((size_t)LP1, TR_USED_EL)));
+    auto resetByteSh = [&](std::vector<std::vector<std::vector<int8_t>>> &a, int8_t val) {
+        if ((int)a.size() < M + 1) a.resize((size_t)M + 1);
+        for (int v = 0; v <= M; ++v) {
+            auto &mv = a[(size_t)v];
+            if ((int)mv.size() < LP1) mv.resize((size_t)LP1);
+            for (int j = 0; j < LP1; ++j) {
+                auto &jv = mv[(size_t)j];
+                if ((int)jv.size() < LP1) jv.resize((size_t)LP1);
+                std::fill(jv.begin(), jv.begin() + LP1, val);
+            }
+        }
     };
-    auto allocIntSh = [&](std::vector<std::vector<std::vector<int>>> &a) {
-        a.assign((size_t)M + 1,
-                 std::vector<std::vector<int>>((size_t)LP1,
-                     std::vector<int>((size_t)LP1, 0)));
-    };
-    auto allocModeSh = [&](std::vector<std::vector<std::vector<int8_t>>> &a) {
-        a.assign((size_t)M + 1,
-                 std::vector<std::vector<int8_t>>((size_t)LP1,
-                     std::vector<int8_t>((size_t)LP1, TR_TRMODE_J)));
+    auto resetIntSh = [&](std::vector<std::vector<std::vector<int>>> &a) {
+        if ((int)a.size() < M + 1) a.resize((size_t)M + 1);
+        for (int v = 0; v <= M; ++v) {
+            auto &mv = a[(size_t)v];
+            if ((int)mv.size() < LP1) mv.resize((size_t)LP1);
+            for (int j = 0; j < LP1; ++j) {
+                auto &jv = mv[(size_t)j];
+                if ((int)jv.size() < LP1) jv.resize((size_t)LP1);
+                std::fill(jv.begin(), jv.begin() + LP1, 0);
+            }
+        }
     };
 
-    allocAlpha(r.Jalpha);
-    if (fill_L) allocAlpha(r.Lalpha);
-    if (fill_R) allocAlpha(r.Ralpha);
-    if (fill_T) allocAlpha(r.Talpha); // Talpha only used at B states; allocate full for simplicity.
+    resetAlpha(r.Jalpha);
+    if (fill_L) resetAlpha(r.Lalpha);
+    if (fill_R) resetAlpha(r.Ralpha);
+    if (fill_T) resetAlpha(r.Talpha); // Talpha only used at B states; allocate full for simplicity.
 
-    allocByteSh(r.Jyshadow);
-    if (fill_L) allocByteSh(r.Lyshadow);
-    if (fill_R) allocByteSh(r.Ryshadow);
-    allocIntSh(r.Jkshadow);
-    if (fill_L) allocIntSh(r.Lkshadow);
-    if (fill_R) allocIntSh(r.Rkshadow);
-    if (fill_T) allocIntSh(r.Tkshadow);
-    if (fill_L) allocModeSh(r.Lkmode);
-    if (fill_R) allocModeSh(r.Rkmode);
+    resetByteSh(r.Jyshadow, (int8_t)TR_USED_EL);
+    if (fill_L) resetByteSh(r.Lyshadow, (int8_t)TR_USED_EL);
+    if (fill_R) resetByteSh(r.Ryshadow, (int8_t)TR_USED_EL);
+    resetIntSh(r.Jkshadow);
+    if (fill_L) resetIntSh(r.Lkshadow);
+    if (fill_R) resetIntSh(r.Rkshadow);
+    if (fill_T) resetIntSh(r.Tkshadow);
+    if (fill_L) resetByteSh(r.Lkmode, (int8_t)TR_TRMODE_J);
+    if (fill_R) resetByteSh(r.Rkmode, (int8_t)TR_TRMODE_J);
 
     // el_scA[d] = elSelf * d. elSelf is in our model already in log2-bits.
     std::vector<float> el_scA((size_t)LP1, 0.0f);
@@ -1172,22 +1197,43 @@ static TrCykResult runTrCYKInsideAlign(const InfernalExactModel &m,
         const double endsc_v = s.endSc;
         if (localOn && !disableEL && trNotImpossible(endsc_v)) {
             const float endF = (float)endsc_v;
+            const simd_float vEndF = simdf32_set(endF);
+            const int VS = VECSIZE_FLOAT;
+            // SIMD over d for each j: Jalpha[v][j][d] = el_scA[d - sd] + endF
             for (int j = 0; j <= L; ++j) {
-                for (int d = sd; d <= j; ++d) {
-                    r.Jalpha[(size_t)v][(size_t)j][(size_t)d] = el_scA[(size_t)(d - sd)] + endF;
+                float *Jrow = r.Jalpha[(size_t)v][(size_t)j].data();
+                int d = sd;
+                for (; d + VS - 1 <= j; d += VS) {
+                    simd_float vEl = simdf32_loadu(&el_scA[(size_t)(d - sd)]);
+                    simdf32_storeu(Jrow + d, simdf32_add(vEl, vEndF));
+                }
+                for (; d <= j; ++d) {
+                    Jrow[d] = el_scA[(size_t)(d - sd)] + endF;
                 }
             }
             if (fill_L) {
                 for (int j = 0; j <= L; ++j) {
-                    for (int d = sdl; d <= j; ++d) {
-                        r.Lalpha[(size_t)v][(size_t)j][(size_t)d] = el_scA[(size_t)(d - sdl)] + endF;
+                    float *Lrow = r.Lalpha[(size_t)v][(size_t)j].data();
+                    int d = sdl;
+                    for (; d + VS - 1 <= j; d += VS) {
+                        simd_float vEl = simdf32_loadu(&el_scA[(size_t)(d - sdl)]);
+                        simdf32_storeu(Lrow + d, simdf32_add(vEl, vEndF));
+                    }
+                    for (; d <= j; ++d) {
+                        Lrow[d] = el_scA[(size_t)(d - sdl)] + endF;
                     }
                 }
             }
             if (fill_R) {
                 for (int j = 0; j <= L; ++j) {
-                    for (int d = sdr; d <= j; ++d) {
-                        r.Ralpha[(size_t)v][(size_t)j][(size_t)d] = el_scA[(size_t)(d - sdr)] + endF;
+                    float *Rrow = r.Ralpha[(size_t)v][(size_t)j].data();
+                    int d = sdr;
+                    for (; d + VS - 1 <= j; d += VS) {
+                        simd_float vEl = simdf32_loadu(&el_scA[(size_t)(d - sdr)]);
+                        simdf32_storeu(Rrow + d, simdf32_add(vEl, vEndF));
+                    }
+                    for (; d <= j; ++d) {
+                        Rrow[d] = el_scA[(size_t)(d - sdr)] + endF;
                     }
                 }
             }
@@ -2820,7 +2866,7 @@ static InfernalExactModel parseInfernalCmExactModelFromStream(std::istream &in, 
                     const char preset_mode = 'U'; // unknown — fill J/L/R/T
                     std::fprintf(stderr, "[TRUNC_TEST] hdr=%s L=%d pty_idx=%d preset=%c\n",
                                  hdr.c_str(), L, pty_idx, preset_mode);
-                    TrCykResult res = runTrCYKInsideAlign(m, dsq, L, preset_mode, pty_idx);
+                    const TrCykResult &res = runTrCYKInsideAlign(m, dsq, L, preset_mode, pty_idx);
                     std::fprintf(stderr, "[TRUNC_TEST] DP done: score=%.4f mode=%c b=%d\n",
                                  res.score, res.mode, res.b);
                     TrParsetree tr = runTrCYKAlignT(m, res, L, pty_idx);
@@ -4399,18 +4445,35 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                         // First transition: bestBuf[ii] = outPtr[ii] + trSc + trSrc[i]
                         // Use bSplitTmp as temp best buffer
                         float *bestBuf = ws.bSplitTmp.data();
+                        const int VS = VECSIZE_FLOAT;
                         {
                             const float *tsrc = trSrcPtrs[0];
                             const float tsc = trScVals[0];
-                            for (int ii = 0; ii < iMax; ++ii) {
+                            const simd_float vtsc = simdf32_set(tsc);
+                            int ii = 0;
+                            for (; ii + VS - 1 < iMax; ii += VS) {
+                                simd_float vo = simdf32_loadu(outPtr + ii);
+                                simd_float vs = simdf32_loadu(tsrc + ii + 1);
+                                simdf32_storeu(bestBuf + ii, simdf32_add(simdf32_add(vo, vtsc), vs));
+                            }
+                            for (; ii < iMax; ++ii) {
                                 bestBuf[ii] = outPtr[ii] + tsc + tsrc[ii + 1];
                             }
                         }
-                        // Remaining transitions
+                        // Remaining transitions: bestBuf = max(bestBuf, outPtr + tsc + tsrc[i+1])
                         for (int t = 1; t < trCountClamped; ++t) {
                             const float *tsrc = trSrcPtrs[t];
                             const float tsc = trScVals[t];
-                            for (int ii = 0; ii < iMax; ++ii) {
+                            const simd_float vtsc = simdf32_set(tsc);
+                            int ii = 0;
+                            for (; ii + VS - 1 < iMax; ii += VS) {
+                                simd_float vo = simdf32_loadu(outPtr + ii);
+                                simd_float vs = simdf32_loadu(tsrc + ii + 1);
+                                simd_float vb = simdf32_loadu(bestBuf + ii);
+                                simd_float cand = simdf32_add(simdf32_add(vo, vtsc), vs);
+                                simdf32_storeu(bestBuf + ii, simdf32_max(vb, cand));
+                            }
+                            for (; ii < iMax; ++ii) {
                                 bestBuf[ii] = std::fmaxf(bestBuf[ii], outPtr[ii] + tsc + tsrc[ii + 1]);
                             }
                         }
@@ -4692,11 +4755,21 @@ static void runInfernalExactScan(const InfernalExactModel &model,
                     }
                     const float bsc = static_cast<float>(cs.beginSc);
                     const size_t yBase = stateBase[static_cast<size_t>(y)];
+                    const simd_float vbsc = simdf32_set(bsc);
+                    const int VS = VECSIZE_FLOAT;
                     for (int d = 0; d <= N; ++d) {
                         const int iMax = (d == 0) ? (N + 1) : (N - d + 1);
                         float *rootRow = &vit[rootBaseLB + static_cast<size_t>(d) * iStride + 1];
                         const float *yRow = &vit[yBase + static_cast<size_t>(d) * iStride + 1];
-                        for (int i = 0; i < iMax; ++i) {
+                        // SIMD: rootRow[i] = max(rootRow[i], yRow[i] + bsc)
+                        int i = 0;
+                        for (; i + VS - 1 < iMax; i += VS) {
+                            simd_float vy = simdf32_loadu(yRow + i);
+                            simd_float vr = simdf32_loadu(rootRow + i);
+                            simd_float cand = simdf32_add(vy, vbsc);
+                            simdf32_storeu(rootRow + i, simdf32_max(vr, cand));
+                        }
+                        for (; i < iMax; ++i) {
                             const float cand = yRow[i] + bsc;
                             if (rootRow[i] < cand) rootRow[i] = cand;
                         }
@@ -6133,6 +6206,12 @@ static void runTruncDpReAlignHits(const InfernalExactModel &model,
     // always runs over the full input.
     static const char *const realignFullEnv = std::getenv("MMSEQS_CMSCAN_REALIGN_FULL");
     const bool realignFull = (realignFullEnv != nullptr && realignFullEnv[0] == '1');
+    // MMSEQS_CMSCAN_TIMING=1 emits per-thread cumulative DP time at end of this
+    // hit batch. Used to A/B test optimization changes without bench-running.
+    static const char *const timingEnv = std::getenv("MMSEQS_CMSCAN_TIMING");
+    const bool timing = (timingEnv != nullptr && timingEnv[0] == '1');
+    long long dpUsTotal = 0;
+    int dpCalls = 0;
     for (Hit &h : hits) {
         int lo = std::min(h.start1, h.end1);
         int hi = std::max(h.start1, h.end1);
@@ -6155,7 +6234,14 @@ static void runTruncDpReAlignHits(const InfernalExactModel &model,
         // and bench-stable.
         static const char *const forceJEnv = std::getenv("MMSEQS_CMSCAN_TRUNC_FORCE_J");
         const char preset = (forceJEnv != nullptr && forceJEnv[0] == '1') ? 'J' : 'U';
-        TrCykResult res = runTrCYKInsideAlign(model, dsq, subLen, preset, pty_idx);
+        std::chrono::steady_clock::time_point _dp_t0;
+        if (timing) _dp_t0 = std::chrono::steady_clock::now();
+        const TrCykResult &res = runTrCYKInsideAlign(model, dsq, subLen, preset, pty_idx);
+        if (timing) {
+            auto _dp_t1 = std::chrono::steady_clock::now();
+            dpUsTotal += std::chrono::duration_cast<std::chrono::microseconds>(_dp_t1 - _dp_t0).count();
+            ++dpCalls;
+        }
         if (!std::isfinite(res.score)) continue;
         TrParsetree tr = runTrCYKAlignT(model, res, subLen, pty_idx);
         if (!tr.ok || tr.nodes.empty()) continue;
@@ -6241,6 +6327,11 @@ static void runTruncDpReAlignHits(const InfernalExactModel &model,
         h.trunc = (res.mode != 'J');
         h.cyk = res.score;
     }
+    if (timing && dpCalls > 0) {
+        Debug(Debug::INFO) << "TRUNC_DP timing: " << dpCalls << " envelopes, "
+                           << dpUsTotal << " us total, "
+                           << (double)dpUsTotal / (double)dpCalls << " us/env\n";
+    }
 }
 
 // Per-envelope CYK re-scan wrapper. When MMSEQS_CMSCAN_RESCORE_ENVELOPE=1,
@@ -6279,10 +6370,32 @@ static void runInfernalExactScanWithEnvelopeRescore(const InfernalExactModel &mo
         rescanQdbOff = (env != NULL && std::string(env) == "1") ? 1 : 0;
     }
 
+    static const char *const _wrapTimingEnv = std::getenv("MMSEQS_CMSCAN_TIMING");
+    const bool _wrapTiming = (_wrapTimingEnv != nullptr && _wrapTimingEnv[0] == '1');
+    // MMSEQS_CMSCAN_SKIP_TRUNC_REALIGN=1: skip the post-scan TRUNC_DP realign step.
+    // Under FORCE_J=1 the realign re-runs the same J-mode CYK that the initial scan
+    // already produced a trace for — pure duplicate work. Skipping is safe when the
+    // scan's CIGAR is acceptable for downstream consumers (it always is for R-scape
+    // .sto rendering via result2dnamsa). Output drops L/R/T-mode hits, but FORCE_J=1
+    // never produces those anyway.
+    static const char *const _skipTruncRealignEnv = std::getenv("MMSEQS_CMSCAN_SKIP_TRUNC_REALIGN");
+    const bool skipTruncRealign = (_skipTruncRealignEnv != nullptr && _skipTruncRealignEnv[0] == '1');
     if (rescoreEnabled == 0) {
+        std::chrono::steady_clock::time_point _t0, _t1, _t2;
+        if (_wrapTiming) _t0 = std::chrono::steady_clock::now();
         runInfernalExactScan(model, seq, wantInside, outHits, seqId, maxHitLen, forcedI, forcedD,
                              anchorI, anchorD);
-        runTruncDpReAlignHits(model, seq, outHits);
+        if (_wrapTiming) _t1 = std::chrono::steady_clock::now();
+        if (!skipTruncRealign) {
+            runTruncDpReAlignHits(model, seq, outHits);
+        }
+        if (_wrapTiming) {
+            _t2 = std::chrono::steady_clock::now();
+            long long us_scan = std::chrono::duration_cast<std::chrono::microseconds>(_t1 - _t0).count();
+            long long us_dp   = std::chrono::duration_cast<std::chrono::microseconds>(_t2 - _t1).count();
+            Debug(Debug::INFO) << "WRAP timing: N=" << seq.size() << " hits=" << outHits.size()
+                               << " scan=" << us_scan << "us dp=" << us_dp << "us\n";
+        }
         return;
     }
 
@@ -6461,7 +6574,12 @@ int cmscan(int argc, const char **argv, const Command &command) {
         // CYK remains the trace source. `wantInsideUser` only changes which
         // score we report, not whether Inside is computed.
         const bool promoteInsideToPrimary = !wantInsideUser;
-        const bool wantInside = true;
+        // MMSEQS_CMSCAN_SKIP_INSIDE=1: skip the Inside DP entirely (CYK still
+        // runs as the trace source). For pipelines that don't consume h.inside
+        // (the bench's permissive -e 10000 path doesn't), this halves cmsearch
+        // CPU time. Verify byte-identical aln output before relying on it.
+        static const char *const _skipInsideEnv = std::getenv("MMSEQS_CMSCAN_SKIP_INSIDE");
+        const bool wantInside = !(_skipInsideEnv != nullptr && _skipInsideEnv[0] == '1');
 
         // Slack for the CYK d-cap. We take the max of:
         //   - 3x the rnasearch prefilter envelope length (local extension)
