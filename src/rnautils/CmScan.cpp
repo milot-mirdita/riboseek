@@ -6723,6 +6723,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
             int dbEnd;
             int qStart;
             int qEnd;
+            int qLen = 0;
             bool hasRegionCoord;
             bool prefilterIsRev;
             std::string backtrace; // SW per-char M/I/D from m8 col 10, if present
@@ -6773,6 +6774,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
                         cand.dbEnd   = Util::fast_atoi<int>(colStart[8]);
                         cand.qStart  = Util::fast_atoi<int>(colStart[4]);
                         cand.qEnd    = Util::fast_atoi<int>(colStart[5]);
+                        cand.qLen    = (colStart[6] != NULL) ? Util::fast_atoi<int>(colStart[6]) : 0;
                         // mmseqs/iter3 may encode minus strand by reversing
                         // either side. Strand is XOR of the two reversals.
                         const bool dbRev = (cand.dbStart > cand.dbEnd);
@@ -6825,10 +6827,36 @@ int cmscan(int argc, const char **argv, const Command &command) {
                 int maxHitLen = 0;
                 if (cmRegionFlanking > 0.0f && cand.hasRegionCoord) {
                     const int qAlnLen = std::max(1, cand.qEnd - cand.qStart + 1);
-                    const int flank = static_cast<int>(cmRegionFlanking * qAlnLen);
+                    // Match the reference branch windowing: keep slack proportional
+                    // to the missing query/model span and bias it toward the missing side.
+                    int leftFlank = 0;
+                    int rightFlank = 0;
+                    const int qLen = std::max(qAlnLen,
+                                              (cand.qLen > 0) ? cand.qLen
+                                                              : qm.exactModel.clen);
+                    if (qLen > 0) {
+                        const int qStartClamped = std::max(0, std::min(cand.qStart, qLen - 1));
+                        const int qEndClamped = std::max(qStartClamped,
+                                                         std::min(cand.qEnd, qLen - 1));
+                        const int leftMissing = qStartClamped;
+                        const int rightMissing = std::max(0, qLen - qEndClamped - 1);
+                        const int totalMissing = leftMissing + rightMissing;
+                        const double missingFrac = static_cast<double>(totalMissing)
+                                                   / static_cast<double>(qLen);
+                        const int baseFlank = static_cast<int>(std::ceil(
+                            static_cast<double>(cmRegionFlanking)
+                            * static_cast<double>(qAlnLen)
+                            * missingFrac));
+                        leftFlank = baseFlank + leftMissing;
+                        rightFlank = baseFlank + rightMissing;
+                    } else {
+                        const int baseFlank = static_cast<int>(cmRegionFlanking * qAlnLen);
+                        leftFlank = baseFlank;
+                        rightFlank = baseFlank;
+                    }
                     const int sLen = static_cast<int>(fs.seq.size());
-                    const int regStart = std::max(0, cand.dbStart - flank);
-                    const int regEnd = std::min(sLen, cand.dbEnd + flank + 1);
+                    const int regStart = std::max(0, cand.dbStart - leftFlank);
+                    const int regEnd = std::min(sLen, cand.dbEnd + rightFlank + 1);
                     if (regStart >= sLen || regEnd <= regStart) {
                         continue;
                     }
