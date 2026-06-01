@@ -69,7 +69,8 @@ std::vector<Command> riboseekCommands = {
                                       {"queryCM", DbType::ACCESS_MODE_OUTPUT, DbType::NEED_DATA, &DbValidator::profileDb }}},
     {"cmbuild", cmbuild, &localPar.cmbuild, COMMAND_PROFILE,
             "Build CM from aligned Stockholm/FASTA input",
-            "riboseek cmbuild queryDB targetDB resultDB outputCMDB\n",
+            "riboseek cmbuild queryDB targetDB resultDB outputCMDB\n"
+            "targetDB and resultDB may be comma-separated lists of equal length.\n",
             "Martin Steinegger <martin.steinegger@snu.ac.kr>",
             "<i:queryDB> <i:targetDB> <i:resultDB> <o:outputCMDB>",
             CITATION_MMSEQS2, {{"queryDB", DbType::ACCESS_MODE_INPUT, DbType::NEED_DATA, &DbValidator::sequenceDb },

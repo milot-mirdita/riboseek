@@ -2,9 +2,10 @@
 #include "CommandDeclarations.h"
 #include "Debug.h"
 #include "DBReader.h"
+#include "DBWriter.h"
+#include "FileUtil.h"
 #include "MMseqsMPI.h"
 #include "Parameters.h"
-#include "DBWriter.h"
 #include "RNAFoldBridge.h"
 #include "Matcher.h"
 #include "Orf.h"
@@ -22,12 +23,17 @@
 #include <omp.h>
 #endif
 
+#include <algorithm>
 #include <cctype>
+#include <cstdio>
 #include <cstdlib>
 #include <set>
 #include <sstream>
 #include <string>
 #include <vector>
+#include <unordered_map>
+#include <sys/stat.h>
+#include <unistd.h>
 
 // Native generatecm command:
 // maps DB -> DB covariance-model generation to MMseqs profile construction.
@@ -154,6 +160,306 @@ static std::string buildStockholmText(const std::string &id,
     return out.str();
 }
 
+
+static std::string trimCopy(const std::string &s) {
+    size_t b = 0;
+    while (b < s.size() && std::isspace(static_cast<unsigned char>(s[b]))) {
+        ++b;
+    }
+    size_t e = s.size();
+    while (e > b && std::isspace(static_cast<unsigned char>(s[e - 1]))) {
+        --e;
+    }
+    return s.substr(b, e - b);
+}
+
+static std::vector<std::string> splitCommaList(const std::string &s) {
+    std::vector<std::string> out;
+    size_t pos = 0;
+    while (pos <= s.size()) {
+        const size_t next = s.find(',', pos);
+        const std::string part = trimCopy(s.substr(pos, next - pos));
+        if (!part.empty()) {
+            out.push_back(part);
+        }
+        if (next == std::string::npos) {
+            break;
+        }
+        pos = next + 1;
+    }
+    if (out.empty() && !trimCopy(s).empty()) {
+        out.push_back(trimCopy(s));
+    }
+    return out;
+}
+
+static void unlinkIfExists(const std::string &path) {
+    if (!path.empty() && FileUtil::fileExists(path.c_str())) {
+        unlink(path.c_str());
+    }
+}
+
+static void removeDbFiles(const std::string &db) {
+    const std::vector<std::string> dataFiles = FileUtil::findDatafiles(db.c_str());
+    for (size_t i = 0; i < dataFiles.size(); ++i) {
+        unlinkIfExists(dataFiles[i]);
+    }
+    unlinkIfExists(db);
+    unlinkIfExists(db + ".index");
+    unlinkIfExists(db + ".dbtype");
+    unlinkIfExists(db + ".lookup");
+    const std::vector<std::string> headerDataFiles = FileUtil::findDatafiles((db + "_h").c_str());
+    for (size_t i = 0; i < headerDataFiles.size(); ++i) {
+        unlinkIfExists(headerDataFiles[i]);
+    }
+    unlinkIfExists(db + "_h");
+    unlinkIfExists(db + "_h.index");
+    unlinkIfExists(db + "_h.dbtype");
+    unlinkIfExists(db + "_h.lookup");
+}
+
+static bool mergeCmbuildInputs(const std::string &queryDb,
+                               const std::vector<std::string> &targetDbs,
+                               const std::vector<std::string> &resultDbs,
+                               const std::string &mergedTargetDb,
+                               const std::string &mergedResultDb,
+                               int threads,
+                               std::string &error) {
+    if (targetDbs.empty() || targetDbs.size() != resultDbs.size()) {
+        error = "target/result DB list sizes do not match";
+        return false;
+    }
+
+    DBReader<unsigned int> qDbr(queryDb.c_str(), (queryDb + ".index").c_str(),
+                                std::max(1, threads),
+                                DBReader<unsigned int>::USE_INDEX);
+    qDbr.open(DBReader<unsigned int>::NOSORT);
+
+    std::vector<DBReader<unsigned int> *> tReaders(targetDbs.size(), NULL);
+    std::vector<DBReader<unsigned int> *> rReaders(resultDbs.size(), NULL);
+    std::vector<std::unordered_map<unsigned int, unsigned int> > keyMaps(targetDbs.size());
+    int mergedTargetDbtype = -1;
+    bool qClosed = false;
+    auto cleanupReaders = [&]() {
+        for (size_t i = 0; i < tReaders.size(); ++i) {
+            if (tReaders[i] != NULL) {
+                tReaders[i]->close();
+                delete tReaders[i];
+                tReaders[i] = NULL;
+            }
+            if (rReaders[i] != NULL) {
+                rReaders[i]->close();
+                delete rReaders[i];
+                rReaders[i] = NULL;
+            }
+        }
+        if (!qClosed) {
+            qDbr.close();
+            qClosed = true;
+        }
+    };
+#define CMBUILD_MERGE_FAIL(msg) do { error = (msg); cleanupReaders(); return false; } while (0)
+
+        for (size_t i = 0; i < targetDbs.size(); ++i) {
+            tReaders[i] = new DBReader<unsigned int>(targetDbs[i].c_str(),
+                                                     (targetDbs[i] + ".index").c_str(),
+                                                     std::max(1, threads),
+                                                     DBReader<unsigned int>::USE_DATA | DBReader<unsigned int>::USE_INDEX);
+            tReaders[i]->open(DBReader<unsigned int>::NOSORT);
+            rReaders[i] = new DBReader<unsigned int>(resultDbs[i].c_str(),
+                                                     (resultDbs[i] + ".index").c_str(),
+                                                     std::max(1, threads),
+                                                     DBReader<unsigned int>::USE_DATA | DBReader<unsigned int>::USE_INDEX);
+            rReaders[i]->open(DBReader<unsigned int>::NOSORT);
+            if (mergedTargetDbtype < 0) {
+                mergedTargetDbtype = tReaders[i]->getDbtype();
+            } else if (tReaders[i]->getDbtype() != mergedTargetDbtype) {
+                error = "target DB types do not match across inputs";
+                CMBUILD_MERGE_FAIL(error);
+            }
+        }
+
+        FILE *targetIndexFile = fopen((mergedTargetDb + ".index").c_str(), "w");
+        if (targetIndexFile == NULL) {
+            error = "failed to create merged target index";
+            CMBUILD_MERGE_FAIL(error);
+        }
+        unsigned int nextTargetKey = 0;
+        size_t nextShardId = 0;
+        size_t cumulativeDataSize = 0;
+        for (size_t ti = 0; ti < tReaders.size(); ++ti) {
+            DBReader<unsigned int> &tDbr = *tReaders[ti];
+            std::unordered_map<unsigned int, unsigned int> &map = keyMaps[ti];
+            map.reserve(tDbr.getSize() * 2 + 1);
+            const std::vector<std::string> dataFiles = FileUtil::findDatafiles(targetDbs[ti].c_str());
+            if (dataFiles.empty()) {
+                error = "no datafiles found for target DB " + targetDbs[ti];
+                CMBUILD_MERGE_FAIL(error);
+            }
+            size_t thisDbDataSize = 0;
+            for (size_t fi = 0; fi < dataFiles.size(); ++fi) {
+                const std::string realDataFile = FileUtil::getRealPathFromSymLink(dataFiles[fi]);
+                struct stat st;
+                if (stat(realDataFile.c_str(), &st) != 0) {
+                    error = "failed to stat target data file " + realDataFile;
+                    CMBUILD_MERGE_FAIL(error);
+                }
+                thisDbDataSize += static_cast<size_t>(st.st_size);
+                const std::string dstShard = mergedTargetDb + "." + SSTR(nextShardId++);
+                if (symlink(realDataFile.c_str(), dstShard.c_str()) != 0) {
+                    error = "failed to symlink target data file " + realDataFile + " -> " + dstShard;
+                    CMBUILD_MERGE_FAIL(error);
+                }
+            }
+            for (size_t id = 0; id < tDbr.getSize(); ++id) {
+                const unsigned int oldKey = tDbr.getDbKey(id);
+                const size_t mergedOffset = cumulativeDataSize + tDbr.getOffset(id);
+                const size_t len = tDbr.getEntryLen(id);
+                fprintf(targetIndexFile, "%u\t%zu\t%zu\n", nextTargetKey, mergedOffset, len);
+                map[oldKey] = nextTargetKey;
+                ++nextTargetKey;
+            }
+            cumulativeDataSize += thisDbDataSize;
+        }
+        if (fclose(targetIndexFile) != 0) {
+            error = "failed to close merged target index";
+            CMBUILD_MERGE_FAIL(error);
+        }
+        {
+            FILE *dbtypeFile = fopen((mergedTargetDb + ".dbtype").c_str(), "wb");
+            if (dbtypeFile == NULL) {
+                error = "failed to create merged target dbtype";
+                CMBUILD_MERGE_FAIL(error);
+            }
+            if (fwrite(&mergedTargetDbtype, sizeof(int), 1, dbtypeFile) != 1) {
+                fclose(dbtypeFile);
+                error = "failed to write merged target dbtype";
+                CMBUILD_MERGE_FAIL(error);
+            }
+            if (fclose(dbtypeFile) != 0) {
+                error = "failed to close merged target dbtype";
+                CMBUILD_MERGE_FAIL(error);
+            }
+        }
+
+        FILE *lookupFilePtr = fopen((mergedTargetDb + ".lookup").c_str(), "w");
+        if (lookupFilePtr == NULL) {
+            error = "failed to create merged target lookup";
+            CMBUILD_MERGE_FAIL(error);
+        }
+        DBWriter headerWriter((mergedTargetDb + "_h").c_str(),
+                              (mergedTargetDb + "_h.index").c_str(),
+                              1, 0, Parameters::DBTYPE_GENERIC_DB);
+        headerWriter.open();
+        unsigned int nextFileNumberOffset = 0;
+        for (size_t ti = 0; ti < tReaders.size(); ++ti) {
+            unsigned int localMaxFileNumber = 0;
+            const std::string srcLookup = targetDbs[ti] + ".lookup";
+            if (FileUtil::fileExists(srcLookup.c_str())) {
+                DBReader<unsigned int> lookupReader(targetDbs[ti].c_str(),
+                                                    (targetDbs[ti] + ".index").c_str(),
+                                                    1,
+                                                    DBReader<unsigned int>::USE_LOOKUP);
+                lookupReader.open(DBReader<unsigned int>::NOSORT);
+                DBReader<unsigned int>::LookupEntry *lookup = lookupReader.getLookup();
+                for (size_t li = 0; li < lookupReader.getLookupSize(); ++li) {
+                    const unsigned int oldKey = lookup[li].id;
+                    std::unordered_map<unsigned int, unsigned int>::const_iterator it = keyMaps[ti].find(oldKey);
+                    if (it == keyMaps[ti].end()) {
+                        continue;
+                    }
+                    const unsigned int mergedKey = it->second;
+                    const unsigned int mergedFileNumber = nextFileNumberOffset + lookup[li].fileNumber;
+                    if (lookup[li].fileNumber > localMaxFileNumber) {
+                        localMaxFileNumber = lookup[li].fileNumber;
+                    }
+                    fprintf(lookupFilePtr, "%u\t%s\t%u\n",
+                            mergedKey,
+                            lookup[li].entryName.c_str(),
+                            mergedFileNumber);
+                    headerWriter.writeData(lookup[li].entryName.c_str(),
+                                           lookup[li].entryName.size(),
+                                           mergedKey,
+                                           0);
+                }
+                lookupReader.close();
+                nextFileNumberOffset += (localMaxFileNumber + 1);
+            } else {
+                DBReader<unsigned int> &tDbr = *tReaders[ti];
+                for (size_t id = 0; id < tDbr.getSize(); ++id) {
+                    const unsigned int oldKey = tDbr.getDbKey(id);
+                    std::unordered_map<unsigned int, unsigned int>::const_iterator it = keyMaps[ti].find(oldKey);
+                    if (it == keyMaps[ti].end()) {
+                        continue;
+                    }
+                    const unsigned int mergedKey = it->second;
+                    fprintf(lookupFilePtr, "%u\t%u\t%u\n", mergedKey, mergedKey, nextFileNumberOffset);
+                    const std::string mergedName = SSTR(mergedKey);
+                    headerWriter.writeData(mergedName.c_str(), mergedName.size(), mergedKey, 0);
+                }
+                nextFileNumberOffset += 1;
+            }
+        }
+        if (fclose(lookupFilePtr) != 0) {
+            error = "failed to close merged target lookup";
+            CMBUILD_MERGE_FAIL(error);
+        }
+        headerWriter.close(true);
+
+        DBWriter resultWriter(mergedResultDb.c_str(), (mergedResultDb + ".index").c_str(),
+                              1, 0, Parameters::DBTYPE_ALIGNMENT_RES);
+        resultWriter.open();
+        for (size_t qi = 0; qi < qDbr.getSize(); ++qi) {
+            const unsigned int queryKey = qDbr.getDbKey(qi);
+            std::string out;
+            for (size_t ri = 0; ri < rReaders.size(); ++ri) {
+                DBReader<unsigned int> &rDbr = *rReaders[ri];
+                const size_t rid = rDbr.getId(queryKey);
+                if (rid == UINT_MAX) {
+                    continue;
+                }
+                char *block = rDbr.getData(rid, 0);
+                const size_t blockLen = rDbr.getEntryLen(rid);
+                size_t pos = 0;
+                const size_t usable = (blockLen == 0 ? 0 : blockLen - 1);
+                while (pos < usable) {
+                    const size_t lineStart = pos;
+                    while (pos < usable && block[pos] != '\n') {
+                        ++pos;
+                    }
+                    const size_t lineEnd = pos;
+                    if (pos < usable && block[pos] == '\n') {
+                        ++pos;
+                    }
+                    if (lineEnd <= lineStart) {
+                        continue;
+                    }
+                    size_t tabPos = lineStart;
+                    while (tabPos < lineEnd && block[tabPos] != '\t') {
+                        ++tabPos;
+                    }
+                    if (tabPos <= lineStart || tabPos >= lineEnd) {
+                        continue;
+                    }
+                    const unsigned int oldKey = static_cast<unsigned int>(
+                        std::strtoul(block + lineStart, NULL, 10));
+                    std::unordered_map<unsigned int, unsigned int>::const_iterator it = keyMaps[ri].find(oldKey);
+                    if (it == keyMaps[ri].end()) {
+                        continue;
+                    }
+                    out.append(SSTR(it->second));
+                    out.append(block + tabPos, lineEnd - tabPos);
+                    out.push_back('\n');
+                }
+            }
+            resultWriter.writeData(out.c_str(), out.size(), queryKey, 0, true, true);
+        }
+        resultWriter.close(true);
+    cleanupReaders();
+#undef CMBUILD_MERGE_FAIL
+    return true;
+}
+
 } // namespace
 
 int cmbuild(int argc, const char **argv, const Command &command) {
@@ -167,12 +473,75 @@ int cmbuild(int argc, const char **argv, const Command &command) {
     par.covMSAThr = 0.5f;
     par.filterMaxSeqId = 0.99f;
     par.Ndiff = 128;
-    par.parseParameters(argc, argv, command, true, 0, 0);
+
+    std::string rawTargetDbArg;
+    std::string rawResultDbArg;
+    std::vector<std::string> parseArgStorage;
+    std::vector<const char *> parseArgv;
+    if (argc > 2) {
+        rawTargetDbArg = argv[1];
+        rawResultDbArg = argv[2];
+        if (rawTargetDbArg.find(',') != std::string::npos
+            || rawResultDbArg.find(',') != std::string::npos) {
+            parseArgStorage.reserve(static_cast<size_t>(argc));
+            parseArgv.reserve(static_cast<size_t>(argc));
+            for (int i = 0; i < argc; ++i) {
+                parseArgStorage.push_back(argv[i]);
+            }
+            const std::vector<std::string> targetParts = splitCommaList(rawTargetDbArg);
+            const std::vector<std::string> resultParts = splitCommaList(rawResultDbArg);
+            if (!targetParts.empty()) {
+                parseArgStorage[1] = targetParts[0];
+            }
+            if (!resultParts.empty()) {
+                parseArgStorage[2] = resultParts[0];
+            }
+            for (size_t i = 0; i < parseArgStorage.size(); ++i) {
+                parseArgv.push_back(parseArgStorage[i].c_str());
+            }
+        }
+    }
+    par.parseParameters(argc,
+                        parseArgv.empty() ? argv : parseArgv.data(),
+                        command,
+                        true,
+                        0,
+                        0);
 
 #ifndef HAVE_INFERNAL_BRIDGE
     Debug(Debug::ERROR) << "cmbuild requires Infernal bridge support\n";
     return EXIT_FAILURE;
 #else
+
+    const std::vector<std::string> targetDbList = splitCommaList(rawTargetDbArg.empty() ? par.db2 : rawTargetDbArg);
+    const std::vector<std::string> resultDbList = splitCommaList(rawResultDbArg.empty() ? par.db3 : rawResultDbArg);
+    if (targetDbList.size() != resultDbList.size()) {
+        Debug(Debug::ERROR) << "cmbuild: targetDB/resultDB list sizes differ ("
+                            << targetDbList.size() << " vs " << resultDbList.size() << ")\n";
+        return EXIT_FAILURE;
+    }
+    const bool useMergedInputs = (targetDbList.size() > 1 || resultDbList.size() > 1);
+    if (useMergedInputs) {
+        const std::string mergedTargetDb = par.db4 + "_target_merged";
+        const std::string mergedResultDb = par.db4 + "_result_merged";
+        removeDbFiles(mergedTargetDb);
+        removeDbFiles(mergedResultDb);
+        std::string mergeErr;
+        Debug(Debug::INFO) << "cmbuild: merging " << targetDbList.size()
+                           << " target/result DB pairs next to output CM DB\n";
+        if (!mergeCmbuildInputs(par.db1, targetDbList, resultDbList,
+                                mergedTargetDb, mergedResultDb,
+                                par.threads, mergeErr)) {
+            Debug(Debug::ERROR) << "cmbuild: failed to merge multi-DB input: " << mergeErr << "\n";
+            return EXIT_FAILURE;
+        }
+        par.db2 = mergedTargetDb;
+        par.db2Index = mergedTargetDb + ".index";
+        par.db3 = mergedResultDb;
+        par.db3Index = mergedResultDb + ".index";
+        Debug(Debug::INFO) << "cmbuild: merged target DB: " << par.db2 << "\n";
+        Debug(Debug::INFO) << "cmbuild: merged result DB: " << par.db3 << "\n";
+    }
 
     // Fork Infernal workers BEFORE loading DBs. Each worker stays ~small
     // (few MB) instead of CoW-ing a post-mmap fat parent, which serializes
