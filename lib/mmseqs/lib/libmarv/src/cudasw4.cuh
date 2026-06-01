@@ -2107,6 +2107,7 @@ namespace cudasw4{
                 pinnedStagingBuffer.resize(bytes);
             }
             cudaSetDevice(deviceIds[srcGpuIndex]); CUERR;
+	    cudaStreamSynchronize(gpuStreams[srcGpuIndex]); CUERR;
             cudaMemcpy(pinnedStagingBuffer.data(), srcPtr, bytes, cudaMemcpyDeviceToHost); CUERR;
             cudaSetDevice(masterDeviceId); CUERR;
             cudaMemcpy(masterDst, pinnedStagingBuffer.data(), bytes, cudaMemcpyHostToDevice); CUERR;
