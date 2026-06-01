@@ -1,6 +1,8 @@
 #include "LocalParameters.h"
 #include "dinuc.out.h"
 
+#include <cfloat>
+
 LocalParameters::LocalParameters() : Parameters(),
     PARAM_CM_REGION(PARAM_CM_REGION_ID, "--cm-region", "CM region flanking",
         "Extract target subregion around prefilter hit for CM alignment.\n"
@@ -19,12 +21,18 @@ LocalParameters::LocalParameters() : Parameters(),
         "Run Infernal cmcalibrate after cmbuild to fit E-value exp-tail parameters.\n"
         "Slow (~1-2s per query). Off by default; CmScan uses a native E-value fallback.",
         typeid(bool), (void *) &calibrateCm,
-        "", MMseqsParameter::COMMAND_MISC)
+        "", MMseqsParameter::COMMAND_MISC),
+    PARAM_CMLITE_MSA_EVAL(PARAM_CMLITE_MSA_EVAL_ID, "--cmlite-msa-eval", "CmLite MSA E-value",
+        "Include only hits with <= this E-value when building the cmbuild seed CM.\n"
+        "All hits from resultDB are still searched afterward; this only filters the CM-building subset.",
+        typeid(double), (void *) &cmliteMsaEvalThr,
+        "^([0-9eE+.-]+|[iI][nN][fF])$", MMseqsParameter::COMMAND_ALIGN)
 {
     cmRegionFlanking = 0.0f;
     cmMode = 0;
     dbSize = 0;
     calibrateCm = false;
+    cmliteMsaEvalThr = DBL_MAX;
 
     // Register dinuc.out as compiled-in matrix and set as default
     scoringMatrixFile = MultiParam<NuclAA<std::string>>(NuclAA<std::string>("dinuc.out", "dinuc.out"));
@@ -55,6 +63,7 @@ LocalParameters::LocalParameters() : Parameters(),
     cmbuild.push_back(&PARAM_FILTER_COV);
     cmbuild.push_back(&PARAM_FILTER_NDIFF);
     cmbuild.push_back(&PARAM_FILTER_MIN_ENABLE);
+    cmbuild.push_back(&PARAM_CMLITE_MSA_EVAL);
     cmbuild.push_back(&PARAM_THREADS);
     cmbuild.push_back(&PARAM_COMPRESSED);
     cmbuild.push_back(&PARAM_V);

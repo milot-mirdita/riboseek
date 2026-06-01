@@ -13,6 +13,7 @@
 #include "MultipleAlignment.h"
 #include "SubstitutionMatrix.h"
 #include "Util.h"
+#include "DinucleotideMapping.h"
 #ifdef HAVE_INFERNAL_BRIDGE
 #include "infernal/InfernalBridge.h"
 #endif
@@ -49,6 +50,68 @@ static inline char normalizeBase(char c) {
     return c;
 }
 
+static int effectiveDecodeSeqType(int dbtype, bool useDinucMapping) {
+    if (!useDinucMapping) {
+        return dbtype;
+    }
+    unsigned int ext = DBReader<unsigned int>::getExtendedDbtype(dbtype);
+    ext |= Parameters::DBTYPE_EXTENDED_DINUCLEOTIDE;
+    if (Parameters::isEqualDbtype(dbtype, Parameters::DBTYPE_HMM_PROFILE)) {
+        return DBReader<unsigned int>::setExtendedDbtype(dbtype, ext);
+    }
+    return DBReader<unsigned int>::setExtendedDbtype(Parameters::DBTYPE_AMINO_ACIDS, ext);
+}
+
+static std::string decodeMappedSequenceToRna(const Sequence &seq,
+                                             const SubstitutionMatrix &subMat,
+                                             const unsigned char *num2outputnum) {
+    std::string out;
+    out.reserve(static_cast<size_t>(seq.L));
+    for (int i = 0; i < seq.L; ++i) {
+        unsigned char code = seq.numSequence[i];
+        if (num2outputnum != NULL) {
+            code = num2outputnum[code];
+        }
+        char c = normalizeBase(subMat.num2aa[code]);
+        if (c != "A"[0] && c != "C"[0] && c != "G"[0] && c != "U"[0]) {
+            c = "N"[0];
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
+static std::string decodeDbSequence(DBReader<unsigned int> &dbr,
+                                    size_t id,
+                                    unsigned int threadIdx,
+                                    Sequence &mapper,
+                                    bool useDinucMapping,
+                                    bool isGpuDb,
+                                    const SubstitutionMatrix &subMat) {
+    const unsigned int seqLen = dbr.getSeqLen(id);
+    if (isGpuDb) {
+        const unsigned char *data =
+            reinterpret_cast<const unsigned char *>(dbr.getDataUncompressed(id));
+        mapper.mapSequence(id, dbr.getDbKey(id), std::make_pair(data, seqLen));
+    } else {
+        const char *data = dbr.getData(id, threadIdx);
+        mapper.mapSequence(id, dbr.getDbKey(id), data, seqLen);
+    }
+
+    const Sequence::SeqAuxInfo *auxInfo = Sequence::getAuxInfo(mapper.getSeqType());
+    const unsigned char *num2outputnum = (useDinucMapping && auxInfo != NULL)
+        ? auxInfo->num2outputnum
+        : NULL;
+    return decodeMappedSequenceToRna(mapper, subMat, num2outputnum);
+}
+
+static inline void convertTsToUs(std::string &seq) {
+    for (size_t i = 0; i < seq.size(); ++i) {
+        if (seq[i] == "T"[0]) seq[i] = "U"[0];
+        else if (seq[i] == "t"[0]) seq[i] = "u"[0];
+    }
+}
+
 // Encode an aligned ACGU/N/'-' row into the byte format MsaFilter expects.
 // Residues map to 0..3 (so they pass `< NAA` and count toward coverage/identity);
 // 'N' maps to NAA (any-residue sentinel); '-' maps to GAP. Encoding doesn't use
@@ -73,7 +136,9 @@ static std::string buildStockholmText(const std::string &id,
     out << "# STOCKHOLM 1.0\n";
     out << "#=GF ID " << (id.empty() ? "mmseqs_model" : id) << "\n";
     for (size_t i = 0; i < seqs.size(); ++i) {
-        out << seqs[i].id << " " << seqs[i].aln << "\n";
+        std::string rnaAln = seqs[i].aln;
+        convertTsToUs(rnaAln);
+        out << seqs[i].id << " " << rnaAln << "\n";
     }
     // Force every alignment column to be a CM match column via --hand: RF line
     // of all 'x' makes consensus column c map 1:1 to query position c-1, so
@@ -140,6 +205,11 @@ int cmbuild(int argc, const char **argv, const Command &command) {
 
     Debug(Debug::INFO) << "Query database size: " << qDbr.getSize() << " type: " << qDbr.getDbTypeName() << "\n";
     Debug(Debug::INFO) << "Target database size: " << tDbr->getSize() << " type: " << tDbr->getDbTypeName() << "\n";
+    {
+        std::ostringstream msaEvalStream;
+        msaEvalStream << std::scientific << par.cmliteMsaEvalThr;
+        Debug(Debug::INFO) << "cmbuild seed E-value threshold: " << msaEvalStream.str() << "\n";
+    }
 
     Debug::Progress progress(resultReader.getSize());
 
@@ -161,6 +231,10 @@ int cmbuild(int argc, const char **argv, const Command &command) {
     // --qid, --qsc, --filter-min-enable. Default is off.
     const bool doMsaFilter = (par.filterMsa != 0);
     SubstitutionMatrix subMat(par.scoringMatrixFile.values.aminoacid().c_str(), 2.0f, 0.0f);
+    const unsigned int targetExt = DBReader<unsigned int>::getExtendedDbtype(tDbr->getDbtype());
+    const bool targetGpuDb = (targetExt & Parameters::DBTYPE_EXTENDED_GPU) != 0;
+    const bool decodeTargetDinuc = ((targetExt & Parameters::DBTYPE_EXTENDED_DINUCLEOTIDE) != 0) || targetGpuDb;
+    const int targetSeqType = effectiveDecodeSeqType(tDbr->getDbtype(), decodeTargetDinuc);
     std::vector<std::string> qid_str_vec = Util::split(par.qid, ",");
     std::vector<int> qid_vec;
     qid_vec.reserve(qid_str_vec.size());
@@ -185,6 +259,7 @@ int cmbuild(int argc, const char **argv, const Command &command) {
         // maxSeqLen and maxSetSize grow inside MsaFilter as needed (increaseSetSize),
         // so seeding with conservative values is fine.
         MsaFilter msaFilter(8192, 1024, &subMat, par.gapOpen.values.aminoacid(), par.gapExtend.values.aminoacid());
+        Sequence targetMapper(tDbr->getMaxSeqLen(), targetSeqType, &subMat, 0, false, false);
         std::vector<unsigned char> encBuf;
         std::vector<const char *> rowPtrs;
 
@@ -233,13 +308,17 @@ int cmbuild(int argc, const char **argv, const Command &command) {
             for (size_t i = 0; i < alnResults.size(); i++) {
                 Matcher::result_t res = alnResults[i];
                 if (res.backtrace.empty()) continue;
+                if (res.eval > par.cmliteMsaEvalThr) continue;
                 const size_t targetId = tDbr->getId(res.dbKey);
                 if (targetId == UINT_MAX) continue;
                 // Infernal requires unique sequence names; skip duplicates.
                 if (seenKeys.find(res.dbKey) != seenKeys.end()) continue;
                 seenKeys.insert(res.dbKey);
 
-                const char *targetSeq = tDbr->getData(targetId, thread_idx);
+                std::string decodedTargetSeq = decodeDbSequence(*tDbr, targetId, thread_idx,
+                                                                targetMapper, decodeTargetDinuc,
+                                                                targetGpuDb, subMat);
+                const char *targetSeq = decodedTargetSeq.c_str();
 
                 // Fold reverse-strand alignments onto the forward query frame
                 // (matches result2dnamsa.cpp). Strand handling lives here so

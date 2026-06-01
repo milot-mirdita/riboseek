@@ -277,6 +277,37 @@ static inline char normalizeBase(char c) {
     return c;
 }
 
+static int effectiveDecodeSeqType(int dbtype, bool useDinucMapping) {
+    if (!useDinucMapping) {
+        return dbtype;
+    }
+    unsigned int ext = DBReader<unsigned int>::getExtendedDbtype(dbtype);
+    ext |= Parameters::DBTYPE_EXTENDED_DINUCLEOTIDE;
+    if (Parameters::isEqualDbtype(dbtype, Parameters::DBTYPE_HMM_PROFILE)) {
+        return DBReader<unsigned int>::setExtendedDbtype(dbtype, ext);
+    }
+    return DBReader<unsigned int>::setExtendedDbtype(Parameters::DBTYPE_AMINO_ACIDS, ext);
+}
+
+static std::string decodeMappedSequenceToRna(const Sequence &seq,
+                                             const BaseMatrix &subMat,
+                                             const unsigned char *num2outputnum) {
+    std::string out;
+    out.reserve(static_cast<size_t>(seq.L));
+    for (int i = 0; i < seq.L; ++i) {
+        unsigned char code = seq.numSequence[i];
+        if (num2outputnum != NULL) {
+            code = num2outputnum[code];
+        }
+        char c = normalizeBase(subMat.num2aa[code]);
+        if (c != 'A' && c != 'C' && c != 'G' && c != 'U') {
+            c = 'N';
+        }
+        out.push_back(c);
+    }
+    return out;
+}
+
 static inline double logSumExp(double a, double b) {
     if (a == NEG_INF) {
         return b;
@@ -3020,6 +3051,8 @@ static FastaSeq decodeOneSequence(DBReader<unsigned int> &dbr,
                                   size_t id,
                                   BaseMatrix &subMat,
                                   Sequence &seqObj,
+                                  bool useDinucMapping,
+                                  bool isGpuDb,
                                   unsigned int thread_idx) {
     FastaSeq cur;
     cur.key = dbr.getDbKey(id);
@@ -3031,17 +3064,19 @@ static FastaSeq decodeOneSequence(DBReader<unsigned int> &dbr,
         cur.id = std::to_string(cur.key);
     }
     const size_t seqLen = dbr.getSeqLen(id);
-    const char *data = dbr.getData(id, thread_idx);
-    cur.seq.reserve(seqLen);
-    seqObj.mapSequence(id, cur.key, data, seqLen);
-    for (int p = 0; p < seqObj.L; ++p) {
-        const char c = normalizeBase(subMat.num2aa[seqObj.numSequence[p]]);
-        if (c == 'A' || c == 'C' || c == 'G' || c == 'U' || c == 'N') {
-            cur.seq.push_back(c);
-        } else {
-            cur.seq.push_back('N');
-        }
+    if (isGpuDb) {
+        const unsigned char *data =
+            reinterpret_cast<const unsigned char *>(dbr.getDataUncompressed(id));
+        seqObj.mapSequence(id, cur.key, std::make_pair(data, seqLen));
+    } else {
+        const char *data = dbr.getData(id, thread_idx);
+        seqObj.mapSequence(id, cur.key, data, seqLen);
     }
+    const Sequence::SeqAuxInfo *auxInfo = Sequence::getAuxInfo(seqObj.getSeqType());
+    const unsigned char *num2outputnum = (useDinucMapping && auxInfo != NULL)
+        ? auxInfo->num2outputnum
+        : NULL;
+    cur.seq = decodeMappedSequenceToRna(seqObj, subMat, num2outputnum);
     return cur;
 }
 
@@ -6512,6 +6547,10 @@ int cmscan(int argc, const char **argv, const Command &command) {
                                       | DBReader<unsigned int>::USE_INDEX
                                       | DBReader<unsigned int>::USE_LOOKUP);
     seqDbr.open(DBReader<unsigned int>::NOSORT);
+    const unsigned int seqExt = DBReader<unsigned int>::getExtendedDbtype(seqDbr.getDbtype());
+    const bool seqGpuDb = (seqExt & Parameters::DBTYPE_EXTENDED_GPU) != 0;
+    const bool decodeSeqDinuc = ((seqExt & Parameters::DBTYPE_EXTENDED_DINUCLEOTIDE) != 0) || seqGpuDb;
+    const int seqDecodeType = effectiveDecodeSeqType(seqDbr.getDbtype(), decodeSeqDinuc);
     NucleotideMatrix nucMat(Parameters::getInstance().scoringMatrixFile.values.nucleotide().c_str(), 1.0, 0.0);
     BaseMatrix &subMat = static_cast<BaseMatrix&>(nucMat);
 
@@ -6764,7 +6803,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
 #ifdef OPENMP
             thread_idx = static_cast<unsigned int>(omp_get_thread_num());
 #endif
-            Sequence seqObjLocal(seqDbr.getMaxSeqLen(), Parameters::DBTYPE_NUCLEOTIDES, &nucMat, 0, false, false);
+            Sequence seqObjLocal(seqDbr.getMaxSeqLen(), seqDecodeType, &nucMat, 0, false, false);
             std::vector<Hit> localHits;
             localHits.reserve(64);
 
@@ -6777,7 +6816,8 @@ int cmscan(int argc, const char **argv, const Command &command) {
                 if (tId == UINT_MAX) {
                     continue;
                 }
-                FastaSeq fs = decodeOneSequence(seqDbr, tId, subMat, seqObjLocal, thread_idx);
+                FastaSeq fs = decodeOneSequence(seqDbr, tId, subMat, seqObjLocal,
+                                                decodeSeqDinuc, seqGpuDb, thread_idx);
 
                 // Build region slice + d-cap.
                 std::string regionSeq;
@@ -6789,6 +6829,9 @@ int cmscan(int argc, const char **argv, const Command &command) {
                     const int sLen = static_cast<int>(fs.seq.size());
                     const int regStart = std::max(0, cand.dbStart - flank);
                     const int regEnd = std::min(sLen, cand.dbEnd + flank + 1);
+                    if (regStart >= sLen || regEnd <= regStart) {
+                        continue;
+                    }
                     regionSeq = fs.seq.substr(static_cast<size_t>(regStart),
                                               static_cast<size_t>(regEnd - regStart));
                     offset = regStart;
