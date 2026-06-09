@@ -167,10 +167,45 @@ jobs:
           name: riboseek-linux-${{ matrix.SIMD }}
           path: build/src/riboseek
 
+  build_ubuntu_gpu:
+    name: Ubuntu GPU
+    runs-on: ubuntu-latest
+    timeout-minutes: 120
+    strategy:
+      fail-fast: false
+      matrix:
+        include:
+          - ARCH: x86_64
+            DOCKER: .github/workflows/Dockerfile.GPU-manylinux2014
+          - ARCH: x86_64-cuda13
+            DOCKER: .github/workflows/Dockerfile.GPU-manylinux_2_28
+          - ARCH: aarch64
+            DOCKER: .github/workflows/Dockerfile.GPU-buster-cross-sbsa
+
+    steps:
+      - uses: actions/checkout@v4
+      #   with:
+      #     submodules: true
+
+      - name: Build GPU Binary in Docker
+        run: |
+          mkdir -p ${{ github.workspace }}/output
+          docker build -t riboseek-gpu-builder -f ${{ matrix.DOCKER }} .
+          docker run --rm \
+            -v ${{ github.workspace }}/output:/output \
+            riboseek-gpu-builder \
+            /bin/bash -c "cp /work/build/src/riboseek /output/"
+
+      - name: Upload Linux GPU
+        uses: actions/upload-artifact@v4
+        with:
+          name: riboseek-linux-gpu-${{ matrix.ARCH }}
+          path: output/riboseek
+
   upload_artifacts:
     name: Upload Artifacts
     runs-on: ubuntu-latest
-    needs: [build_macos, build_ubuntu, build_ubuntu_cross]
+    needs: [build_macos, build_ubuntu, build_ubuntu_cross, build_ubuntu_gpu]
     if: github.event_name != 'pull_request'
     steps:
       - uses: actions/checkout@v4
@@ -229,6 +264,42 @@ jobs:
           chmod +x riboseek/bin/riboseek
           tar -czvf riboseek-linux-arm64.tar.gz riboseek
 
+      # Linux GPU x86_64 (CUDA 12)
+      - name: Download riboseek-linux-gpu-x86_64 Artifact
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: riboseek-linux-gpu-x86_64
+          path: riboseek/bin
+
+      - name: Archive GPU x86_64 Binary
+        run: |
+          chmod +x riboseek/bin/riboseek
+          tar -czvf riboseek-linux-gpu.tar.gz riboseek
+
+      # Linux GPU x86_64 (CUDA 13)
+      - name: Download riboseek-linux-gpu-x86_64-cuda13 Artifact
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: riboseek-linux-gpu-x86_64-cuda13
+          path: riboseek/bin
+
+      - name: Archive GPU x86_64 CUDA 13 Binary
+        run: |
+          chmod +x riboseek/bin/riboseek
+          tar -czvf riboseek-linux-gpu-cuda13.tar.gz riboseek
+
+      # Linux GPU ARM64 (CUDA 13)
+      - name: Download riboseek-linux-gpu-aarch64 Artifact
+        uses: actions/download-artifact@v4.1.7
+        with:
+          name: riboseek-linux-gpu-aarch64
+          path: riboseek/bin
+
+      - name: Archive GPU ARM64 Binary
+        run: |
+          chmod +x riboseek/bin/riboseek
+          tar -czvf riboseek-linux-gpu-arm64.tar.gz riboseek
+
       - name: Get Deployment Key
         run: |
             mkdir -p $HOME/.ssh
@@ -240,11 +311,14 @@ jobs:
 
       - name: Sign and Upload Artifacts
         run: |
-          ssh-keygen -Y sign -f $HOME/.ssh/id_rsa -n file riboseek-osx-universal.tar.gz riboseek-linux-sse41.tar.gz riboseek-linux-avx2.tar.gz riboseek-linux-arm64.tar.gz
+          ssh-keygen -Y sign -f $HOME/.ssh/id_rsa -n file riboseek-osx-universal.tar.gz riboseek-linux-sse41.tar.gz riboseek-linux-avx2.tar.gz riboseek-linux-arm64.tar.gz riboseek-linux-gpu.tar.gz riboseek-linux-gpu-cuda13.tar.gz riboseek-linux-gpu-arm64.tar.gz
           curl --retry 5 --retry-all-errors --fail -X POST \
             -F file[]=@riboseek-osx-universal.tar.gz -F signature[]=@riboseek-osx-universal.tar.gz.sig \
             -F file[]=@riboseek-linux-sse41.tar.gz -F signature[]=@riboseek-linux-sse41.tar.gz.sig \
             -F file[]=@riboseek-linux-avx2.tar.gz -F signature[]=@riboseek-linux-avx2.tar.gz.sig \
             -F file[]=@riboseek-linux-arm64.tar.gz -F signature[]=@riboseek-linux-arm64.tar.gz.sig \
+            -F file[]=@riboseek-linux-gpu.tar.gz -F signature[]=@riboseek-linux-gpu.tar.gz.sig \
+            -F file[]=@riboseek-linux-gpu-cuda13.tar.gz -F signature[]=@riboseek-linux-gpu-cuda13.tar.gz.sig \
+            -F file[]=@riboseek-linux-gpu-arm64.tar.gz -F signature[]=@riboseek-linux-gpu-arm64.tar.gz.sig \
             -F identifier="riboseek" -F directory="${{ github.sha }}" \
               https://mmseqs.com/upload
