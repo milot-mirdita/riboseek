@@ -16,6 +16,16 @@ include(MMseqsSetupDerivedTarget)
 add_subdirectory(lib/mmseqs EXCLUDE_FROM_ALL)
 target_compile_definitions(mmseqs-framework PUBLIC RIBOSEEK=1)
 
+# Hack: apply static linker flags until the scope is fixed in mmseqs
+if(FORCE_STATIC_DEPS)
+    if(ENABLE_CUDA)
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static-libgcc -static-libstdc++")
+    else()
+        set(CMAKE_EXE_LINKER_FLAGS "${CMAKE_EXE_LINKER_FLAGS} -static -static-libgcc -static-libstdc++")
+    endif()
+endif()
+
+
 set(RIBOSEEK_FRAMEWORK_ONLY 0 CACHE BOOL "Framework mode (don't create riboseek executable)")
 if (RIBOSEEK_FRAMEWORK_ONLY)
     set(FRAMEWORK_ONLY 1 CACHE INTERNAL "" FORCE)
