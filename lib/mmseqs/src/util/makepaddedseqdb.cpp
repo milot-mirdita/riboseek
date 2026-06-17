@@ -25,9 +25,6 @@ int makepaddedseqdb(int argc, const char **argv, const Command &command) {
     SubstitutionMatrix subMat(par.scoringMatrixFile.values.aminoacid().c_str(), 2.0, par.scoreBias);
 
     int dbType = DBReader<unsigned int>::setExtendedDbtype(dbr.getDbtype(), Parameters::DBTYPE_EXTENDED_GPU);
-#ifdef RIBOSEEK
-    dbType = DBReader<unsigned int>::setExtendedDbtype(Parameters::DBTYPE_AMINO_ACIDS, Parameters::DBTYPE_EXTENDED_GPU);
-#endif
     DBWriter dbsw(par.db2.c_str(), par.db2Index.c_str(), par.threads, false, dbType);
     dbsw.open();
     DBWriter dbhw(par.hdr2.c_str(), par.hdr2Index.c_str(), par.threads, false, Parameters::DBTYPE_GENERIC_DB);
