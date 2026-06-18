@@ -47,6 +47,8 @@ int riboseekSearch(int argc, const char **argv, const Command &command) {
                         MMseqsParameter::COMMAND_ALIGN | MMseqsParameter::COMMAND_PREFILTER);
 
     std::string indexStr = PrefilteringIndexReader::searchForIndex(par.db2);
+    const bool queryProfileDb =
+	    Parameters::isEqualDbtype(FileUtil::parseDbType(par.db1.c_str()), Parameters::DBTYPE_HMM_PROFILE);
     const bool targetGpuDb =
         (DBReader<unsigned int>::getExtendedDbtype(FileUtil::parseDbType(par.db2.c_str())) 
 	 & Parameters::DBTYPE_EXTENDED_GPU) != 0;
@@ -125,6 +127,7 @@ int riboseekSearch(int argc, const char **argv, const Command &command) {
 
     cmd.addVariable("HAVE_INDEX", (indexStr == "") ? NULL : "TRUE");
     cmd.addVariable("SPLITSTRAND", "TRUE");
+    cmd.addVariable("QUERY_IS_PROFILE", queryProfileDb ? "TRUE" : NULL);
     cmd.addVariable("SPLITSEQUENCE_PAR", par.createParameterString(par.splitsequence).c_str());
     // Match fork's behavior: single-iter splits target (via blastdi.sh);
     // multi-iter skips target split (blastdigp.sh has the block commented out).
@@ -145,7 +148,7 @@ int riboseekSearch(int argc, const char **argv, const Command &command) {
     for (int i = 0; i < par.numIterations; i++) {
         // Match old MMseqs2 nucl-nucl iterative search: realign disabled across
         // all iterations (Search.cpp lines 511-518 in the forked MMseqs2).
-	if (i == 0) {
+	if (i == 0 && queryProfileDb == false) {
             par.realign = true;
 	} else {
             par.realign = false;

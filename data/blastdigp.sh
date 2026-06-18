@@ -123,7 +123,7 @@ while [ "$STEP" -lt "$NUM_IT" ]; do
             # Force query to HMM_PROFILE + DINUCLEOTIDE + SRC_SEQUENCE + STRAND_SPLIT
             # so prefilter treats sequences as profiles (on-the-fly profile from submat)
             # HMM_PROFILE=2, DINUCLEOTIDE=64, SRC_SEQUENCE=32, STRAND_SPLIT=128 => ext=0xE0
-            if [ -n "$SPLITSTRAND" ]; then
+            if [ -n "$SPLITSTRAND" ] && [ -z "$QUERY_IS_PROFILE" ]; then
                 if [ -L "$QUERYDB.dbtype" ]; then
                     rm -f "$QUERYDB.dbtype"
                 fi
