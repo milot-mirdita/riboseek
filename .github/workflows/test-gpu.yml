@@ -2,7 +2,7 @@ name: Test GPU
 on:
   push:
     branches:
-        - master
+        - main
 jobs:
   test_gpu:
     runs-on: [ self-hosted, slurm, gpu ]
