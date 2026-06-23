@@ -377,8 +377,9 @@ static bool mergeCmbuildInputs(const std::string &queryDb,
                             mergedKey,
                             lookup[li].entryName.c_str(),
                             mergedFileNumber);
-                    headerWriter.writeData(lookup[li].entryName.c_str(),
-                                           lookup[li].entryName.size(),
+		    const std::string headerName = lookup[li].entryName + "\n";
+                    headerWriter.writeData(headerName.c_str(),
+                                           headerName.size(),
                                            mergedKey,
                                            0);
                 }
@@ -394,7 +395,7 @@ static bool mergeCmbuildInputs(const std::string &queryDb,
                     }
                     const unsigned int mergedKey = it->second;
                     fprintf(lookupFilePtr, "%u\t%u\t%u\n", mergedKey, mergedKey, nextFileNumberOffset);
-                    const std::string mergedName = SSTR(mergedKey);
+		    const std::string mergedName = SSTR(mergedKey) + "\n";
                     headerWriter.writeData(mergedName.c_str(), mergedName.size(), mergedKey, 0);
                 }
                 nextFileNumberOffset += 1;

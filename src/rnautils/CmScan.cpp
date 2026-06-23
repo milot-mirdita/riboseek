@@ -7291,6 +7291,7 @@ int cmscan(int argc, const char **argv, const Command &command) {
         } else {
             name = std::to_string(key);
         }
+	name.push_back('\n');
         headerWriter.writeData(name.c_str(), name.size(), key, 0);
     }
     headerWriter.close();
