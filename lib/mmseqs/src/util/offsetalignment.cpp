@@ -279,7 +279,7 @@ int offsetalignment(int argc, const char **argv, const Command &command) {
     unsigned int *contigOffsets = NULL;
     char *contigExists = NULL;
     unsigned int maxContigKey = 0;
-    if (Parameters::isEqualDbtype(queryDbType, Parameters::DBTYPE_NUCLEOTIDES)) {
+    if (queryNucl) {
         Timer timer;
         Debug(Debug::INFO) << "Computing ORF lookup\n";
         unsigned int maxOrfKey = alnDbr.getLastKey();
@@ -348,7 +348,7 @@ int offsetalignment(int argc, const char **argv, const Command &command) {
     resultWriter.open();
 
     size_t entryCount = alnDbr.getSize();
-    if (Parameters::isEqualDbtype(queryDbType, Parameters::DBTYPE_NUCLEOTIDES)) {
+    if (queryNucl) {
         entryCount = maxContigKey + 1;
     }
     Debug::Progress progress(entryCount);
@@ -378,7 +378,7 @@ int offsetalignment(int argc, const char **argv, const Command &command) {
             unsigned int queryKey=UINT_MAX;
             unsigned int qLen = UINT_MAX;
 
-            if (Parameters::isEqualDbtype(queryDbType, Parameters::DBTYPE_NUCLEOTIDES)) {
+            if (queryNucl) {
                 queryKey = i;
                 if (contigExists[i] == 0) {
                     continue;
