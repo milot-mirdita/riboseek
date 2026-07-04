@@ -41,8 +41,5 @@ if (ENABLE_INFERNAL_BRIDGE)
     add_subdirectory(lib/infernal)
 endif ()
 
-# ViennaRNA minimal library (hand-rolled CMake wrapper, autotools-free)
-add_subdirectory(lib/viennarna)
-
 add_subdirectory(data)
 add_subdirectory(src)

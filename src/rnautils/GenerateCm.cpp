@@ -6,7 +6,7 @@
 #include "FileUtil.h"
 #include "MMseqsMPI.h"
 #include "Parameters.h"
-#include "RNAFoldBridge.h"
+#include "RnaFoldingBridge.h"
 #include "Matcher.h"
 #include "Orf.h"
 #include "LocalParameters.h"
