@@ -39,6 +39,7 @@ if (ENABLE_INFERNAL_BRIDGE)
         message(FATAL_ERROR "ENABLE_INFERNAL_BRIDGE=ON requires INFERNAL_ROOT with src/cmbuild.c")
     endif ()
     add_subdirectory(lib/infernal)
+    add_subdirectory(lib/tornadofold EXCLUDE_FROM_ALL)
 endif ()
 
 add_subdirectory(data)
