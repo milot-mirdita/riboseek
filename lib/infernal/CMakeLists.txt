@@ -68,7 +68,7 @@ find_package(Threads REQUIRED)
 
 set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/easel.c
-        ${INFERNAL_EASEL_DIR}/esl_alloc.c
+        # ${INFERNAL_EASEL_DIR}/esl_alloc.c
         ${INFERNAL_EASEL_DIR}/esl_alphabet.c
         ${INFERNAL_EASEL_DIR}/esl_arr2.c
         ${INFERNAL_EASEL_DIR}/esl_arr3.c
@@ -76,38 +76,38 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_buffer.c
         ${INFERNAL_EASEL_DIR}/esl_cluster.c
         ${INFERNAL_EASEL_DIR}/esl_composition.c
-        ${INFERNAL_EASEL_DIR}/esl_cpu.c
+        # ${INFERNAL_EASEL_DIR}/esl_cpu.c
         ${INFERNAL_EASEL_DIR}/esl_dirichlet.c
         ${INFERNAL_EASEL_DIR}/esl_distance.c
         ${INFERNAL_EASEL_DIR}/esl_dmatrix.c
-        ${INFERNAL_EASEL_DIR}/esl_dsqdata.c
+        # ${INFERNAL_EASEL_DIR}/esl_dsqdata.c
         ${INFERNAL_EASEL_DIR}/esl_exponential.c
         ${INFERNAL_EASEL_DIR}/esl_fileparser.c
-        ${INFERNAL_EASEL_DIR}/esl_gamma.c
-        ${INFERNAL_EASEL_DIR}/esl_gencode.c
+        # ${INFERNAL_EASEL_DIR}/esl_gamma.c
+        # ${INFERNAL_EASEL_DIR}/esl_gencode.c
         ${INFERNAL_EASEL_DIR}/esl_getopts.c
-        ${INFERNAL_EASEL_DIR}/esl_gev.c
+        # ${INFERNAL_EASEL_DIR}/esl_gev.c
         ${INFERNAL_EASEL_DIR}/esl_graph.c
         ${INFERNAL_EASEL_DIR}/esl_gumbel.c
-        ${INFERNAL_EASEL_DIR}/esl_heap.c
+        # ${INFERNAL_EASEL_DIR}/esl_heap.c
         ${INFERNAL_EASEL_DIR}/esl_histogram.c
         ${INFERNAL_EASEL_DIR}/esl_hmm.c
-        ${INFERNAL_EASEL_DIR}/esl_huffman.c
-        ${INFERNAL_EASEL_DIR}/esl_hyperexp.c
-        ${INFERNAL_EASEL_DIR}/esl_iset.c
-        ${INFERNAL_EASEL_DIR}/esl_json.c
+        # ${INFERNAL_EASEL_DIR}/esl_huffman.c
+        # ${INFERNAL_EASEL_DIR}/esl_hyperexp.c
+        # ${INFERNAL_EASEL_DIR}/esl_iset.c
+        # ${INFERNAL_EASEL_DIR}/esl_json.c
         ${INFERNAL_EASEL_DIR}/esl_keyhash.c
-        ${INFERNAL_EASEL_DIR}/esl_lognormal.c
+        # ${INFERNAL_EASEL_DIR}/esl_lognormal.c
         ${INFERNAL_EASEL_DIR}/esl_matrixops.c
         ${INFERNAL_EASEL_DIR}/esl_mem.c
         ${INFERNAL_EASEL_DIR}/esl_minimizer.c
         ${INFERNAL_EASEL_DIR}/esl_mixdchlet.c
-        ${INFERNAL_EASEL_DIR}/esl_mixgev.c
-        ${INFERNAL_EASEL_DIR}/esl_mpi.c
+        # ${INFERNAL_EASEL_DIR}/esl_mixgev.c
+        # ${INFERNAL_EASEL_DIR}/esl_mpi.c
         ${INFERNAL_EASEL_DIR}/esl_msa.c
         ${INFERNAL_EASEL_DIR}/esl_msacluster.c
         ${INFERNAL_EASEL_DIR}/esl_msafile.c
-        ${INFERNAL_EASEL_DIR}/esl_msafile2.c
+        # ${INFERNAL_EASEL_DIR}/esl_msafile2.c
         ${INFERNAL_EASEL_DIR}/esl_msafile_a2m.c
         ${INFERNAL_EASEL_DIR}/esl_msafile_afa.c
         ${INFERNAL_EASEL_DIR}/esl_msafile_clustal.c
@@ -115,18 +115,18 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_msafile_psiblast.c
         ${INFERNAL_EASEL_DIR}/esl_msafile_selex.c
         ${INFERNAL_EASEL_DIR}/esl_msafile_stockholm.c
-        ${INFERNAL_EASEL_DIR}/esl_msashuffle.c
+        # ${INFERNAL_EASEL_DIR}/esl_msashuffle.c
         ${INFERNAL_EASEL_DIR}/esl_msaweight.c
-        ${INFERNAL_EASEL_DIR}/esl_normal.c
-        ${INFERNAL_EASEL_DIR}/esl_paml.c
+        # ${INFERNAL_EASEL_DIR}/esl_normal.c
+        # ${INFERNAL_EASEL_DIR}/esl_paml.c
         ${INFERNAL_EASEL_DIR}/esl_quicksort.c
         ${INFERNAL_EASEL_DIR}/esl_random.c
         ${INFERNAL_EASEL_DIR}/esl_rand64.c
         ${INFERNAL_EASEL_DIR}/esl_randomseq.c
         ${INFERNAL_EASEL_DIR}/esl_ratematrix.c
-        ${INFERNAL_EASEL_DIR}/esl_recorder.c
-        ${INFERNAL_EASEL_DIR}/esl_red_black.c
-        ${INFERNAL_EASEL_DIR}/esl_regexp.c
+        # ${INFERNAL_EASEL_DIR}/esl_recorder.c
+        # ${INFERNAL_EASEL_DIR}/esl_red_black.c
+        # ${INFERNAL_EASEL_DIR}/esl_regexp.c
         ${INFERNAL_EASEL_DIR}/esl_rootfinder.c
         ${INFERNAL_EASEL_DIR}/esl_scorematrix.c
         ${INFERNAL_EASEL_DIR}/esl_sq.c
@@ -137,49 +137,49 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_stack.c
         ${INFERNAL_EASEL_DIR}/esl_stats.c
         ${INFERNAL_EASEL_DIR}/esl_stopwatch.c
-        ${INFERNAL_EASEL_DIR}/esl_stretchexp.c
-        ${INFERNAL_EASEL_DIR}/esl_subcmd.c
+        # ${INFERNAL_EASEL_DIR}/esl_stretchexp.c
+        # ${INFERNAL_EASEL_DIR}/esl_subcmd.c
         ${INFERNAL_EASEL_DIR}/esl_threads.c
         ${INFERNAL_EASEL_DIR}/esl_tree.c
-        ${INFERNAL_EASEL_DIR}/esl_varint.c
+        # ${INFERNAL_EASEL_DIR}/esl_varint.c
         ${INFERNAL_EASEL_DIR}/esl_vectorops.c
-        ${INFERNAL_EASEL_DIR}/esl_weibull.c
+        # ${INFERNAL_EASEL_DIR}/esl_weibull.c
         ${INFERNAL_EASEL_DIR}/esl_workqueue.c
         ${INFERNAL_EASEL_DIR}/esl_wuss.c
 )
 
 set(HMMER_SRCS
         ${INFERNAL_HMMER_SRC_DIR}/build.c
-        ${INFERNAL_HMMER_SRC_DIR}/cachedb.c
-        ${INFERNAL_HMMER_SRC_DIR}/cachedb_shard.c
+        # ${INFERNAL_HMMER_SRC_DIR}/cachedb.c
+        # ${INFERNAL_HMMER_SRC_DIR}/cachedb_shard.c
         ${INFERNAL_HMMER_SRC_DIR}/emit.c
         ${INFERNAL_HMMER_SRC_DIR}/errors.c
         ${INFERNAL_HMMER_SRC_DIR}/evalues.c
         ${INFERNAL_HMMER_SRC_DIR}/eweight.c
         ${INFERNAL_HMMER_SRC_DIR}/generic_decoding.c
         ${INFERNAL_HMMER_SRC_DIR}/generic_fwdback.c
-        ${INFERNAL_HMMER_SRC_DIR}/generic_fwdback_chk.c
-        ${INFERNAL_HMMER_SRC_DIR}/generic_fwdback_banded.c
+        # ${INFERNAL_HMMER_SRC_DIR}/generic_fwdback_chk.c
+        # ${INFERNAL_HMMER_SRC_DIR}/generic_fwdback_banded.c
         ${INFERNAL_HMMER_SRC_DIR}/generic_null2.c
-        ${INFERNAL_HMMER_SRC_DIR}/generic_msv.c
+        # ${INFERNAL_HMMER_SRC_DIR}/generic_msv.c
         ${INFERNAL_HMMER_SRC_DIR}/generic_optacc.c
         ${INFERNAL_HMMER_SRC_DIR}/generic_stotrace.c
-        ${INFERNAL_HMMER_SRC_DIR}/generic_viterbi.c
-        ${INFERNAL_HMMER_SRC_DIR}/generic_vtrace.c
-        ${INFERNAL_HMMER_SRC_DIR}/h2_io.c
-        ${INFERNAL_HMMER_SRC_DIR}/heatmap.c
+        # ${INFERNAL_HMMER_SRC_DIR}/generic_viterbi.c
+        # ${INFERNAL_HMMER_SRC_DIR}/generic_vtrace.c
+        # ${INFERNAL_HMMER_SRC_DIR}/h2_io.c
+        # ${INFERNAL_HMMER_SRC_DIR}/heatmap.c
         ${INFERNAL_HMMER_SRC_DIR}/hmmlogo.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr_shard.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmd_search_status.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmdwrkr.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmdwrkr_shard.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmdutils.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr_shard.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmd_search_status.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmdwrkr.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmdwrkr_shard.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmdutils.c
         ${INFERNAL_HMMER_SRC_DIR}/hmmer.c
         ${INFERNAL_HMMER_SRC_DIR}/logsum.c
         ${INFERNAL_HMMER_SRC_DIR}/modelconfig.c
         ${INFERNAL_HMMER_SRC_DIR}/modelstats.c
-        ${INFERNAL_HMMER_SRC_DIR}/mpisupport.c
+        # ${INFERNAL_HMMER_SRC_DIR}/mpisupport.c
         ${INFERNAL_HMMER_SRC_DIR}/seqmodel.c
         ${INFERNAL_HMMER_SRC_DIR}/tracealign.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_alidisplay.c
@@ -187,14 +187,14 @@ set(HMMER_SRCS
         ${INFERNAL_HMMER_SRC_DIR}/p7_builder.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_domain.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_domaindef.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_gbands.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_gbands.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_gmx.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_gmxb.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_gmxchk.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_gmxb.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_gmxchk.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_hit.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_hmm.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_hmmcache.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_hmmd_search_stats.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_hmmcache.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_hmmd_search_stats.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_hmmfile.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_hmmwindow.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_pipeline.c
@@ -204,7 +204,7 @@ set(HMMER_SRCS
         ${INFERNAL_HMMER_SRC_DIR}/p7_tophits.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_trace.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_scoredata.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmpgmd2msa.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmpgmd2msa.c
         ${INFERNAL_HMMER_SRC_DIR}/fm_alphabet.c
         ${INFERNAL_HMMER_SRC_DIR}/fm_general.c
         ${INFERNAL_HMMER_SRC_DIR}/fm_sse.c
@@ -231,7 +231,7 @@ set(HMMER_IMPL_SRCS
         ${HMMER_IMPL_DIR}/vitfilter.c
         ${HMMER_IMPL_DIR}/p7_omx.c
         ${HMMER_IMPL_DIR}/p7_oprofile.c
-        ${HMMER_IMPL_DIR}/mpi.c
+        # ${HMMER_IMPL_DIR}/mpi.c
 )
 if (ARM)
     list(APPEND EASEL_SRCS ${INFERNAL_EASEL_DIR}/esl_neon.c)
@@ -258,7 +258,7 @@ set(INFERNAL_CORE_SRCS
         ${INFERNAL_SRC_DIR}/cm_submodel.c
         ${INFERNAL_SRC_DIR}/cm_tophits.c
         ${INFERNAL_SRC_DIR}/cm_trunc.c
-        ${INFERNAL_SRC_DIR}/cm_p7_band.c
+        # ${INFERNAL_SRC_DIR}/cm_p7_band.c
         ${INFERNAL_SRC_DIR}/cm_p7_domaindef.c
         ${INFERNAL_SRC_DIR}/cm_p7_modelconfig_trunc.c
         ${INFERNAL_SRC_DIR}/cm_p7_modelmaker.c
@@ -273,7 +273,7 @@ set(INFERNAL_CORE_SRCS
         ${INFERNAL_SRC_DIR}/eweight.c
         ${INFERNAL_SRC_DIR}/hmmband.c
         ${INFERNAL_SRC_DIR}/logsum.c
-        ${INFERNAL_SRC_DIR}/mpisupport.c
+        # ${INFERNAL_SRC_DIR}/mpisupport.c
         ${INFERNAL_SRC_DIR}/prior.c
         ${INFERNAL_SRC_DIR}/rnamat.c
         ${INFERNAL_SRC_DIR}/stats.c

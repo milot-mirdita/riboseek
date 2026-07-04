@@ -25,8 +25,8 @@ target_include_directories(riboseek-framework PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 if (TARGET infernal-bridge)
     target_link_libraries(riboseek-framework infernal-bridge)
     target_compile_definitions(riboseek-framework PUBLIC -DHAVE_INFERNAL_BRIDGE=1)
-    target_link_libraries(riboseek-framework tornadofold::tornadofold)
 endif()
+target_link_libraries(riboseek-framework tornadofold::tornadofold)
 
 
 if (NOT RIBOSEEK_FRAMEWORK_ONLY)
