@@ -309,34 +309,3 @@ target_include_directories(infernal-vendor-core PRIVATE
         ${INFERNAL_EASEL_DIR}
 )
 target_link_libraries(infernal-vendor-core PUBLIC infernal-vendor-hmmer infernal-vendor-easel Threads::Threads m)
-
-add_library(infernal-bridge
-        InfernalBridge.cpp
-        CmCalibrateCapture.c
-        ${INFERNAL_SRC_DIR}/cmbuild.c
-        ${INFERNAL_SRC_DIR}/cmcalibrate.c
-)
-
-set_source_files_properties(${INFERNAL_SRC_DIR}/cmbuild.c PROPERTIES
-        COMPILE_DEFINITIONS "main=infernal_cmbuild_main;exit=infernal_bridge_exit")
-set_source_files_properties(${INFERNAL_SRC_DIR}/cmcalibrate.c PROPERTIES
-        COMPILE_DEFINITIONS "main=infernal_cmcalibrate_main_impl;exit=infernal_bridge_exit")
-
-target_compile_definitions(infernal-bridge PRIVATE HAVE_CONFIG_H=1)
-
-target_include_directories(infernal-bridge PUBLIC ${CMAKE_CURRENT_SOURCE_DIR})
-target_include_directories(infernal-bridge PRIVATE
-        ${INFERNAL_CONFIGURE_DIR}/src
-        ${INFERNAL_CONFIGURE_DIR}/easel
-        ${INFERNAL_SRC_DIR}
-        ${INFERNAL_HMMER_SRC_DIR}
-        ${INFERNAL_EASEL_DIR}
-)
-
-target_link_libraries(infernal-bridge
-        infernal-vendor-core
-        infernal-vendor-hmmer
-        infernal-vendor-easel
-        Threads::Threads
-        m
-)

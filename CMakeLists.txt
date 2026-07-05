@@ -31,16 +31,13 @@ if (RIBOSEEK_FRAMEWORK_ONLY)
     set(FRAMEWORK_ONLY 1 CACHE INTERNAL "" FORCE)
 endif()
 
-# Infernal bridge for cmbuild
-set(ENABLE_INFERNAL_BRIDGE 1 CACHE BOOL "Enable embedded Infernal-backed CM build bridge")
 set(INFERNAL_ROOT "${CMAKE_CURRENT_SOURCE_DIR}/lib/infernal/vendor" CACHE PATH "Path to vendored Infernal source/build tree")
-if (ENABLE_INFERNAL_BRIDGE)
-    if (NOT EXISTS ${INFERNAL_ROOT}/src/cmbuild.c)
-        message(FATAL_ERROR "ENABLE_INFERNAL_BRIDGE=ON requires INFERNAL_ROOT with src/cmbuild.c")
-    endif ()
-    add_subdirectory(lib/infernal)
-    add_subdirectory(lib/tornadofold EXCLUDE_FROM_ALL)
+if (NOT EXISTS ${INFERNAL_ROOT}/src/cmbuild.c)
+    message(FATAL_ERROR "riboseek requires vendored infernal at INFERNAL_ROOT")
 endif ()
+add_subdirectory(lib/infernal)
+
+add_subdirectory(lib/tornadofold EXCLUDE_FROM_ALL)
 
 add_subdirectory(data)
 add_subdirectory(src)

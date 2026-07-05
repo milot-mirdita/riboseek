@@ -25,13 +25,11 @@ public:
     float cmRegionFlanking;
     int cmMode;
     size_t dbSize;
-    bool calibrateCm;
     double cmliteMsaEvalThr;
 
     PARAMETER(PARAM_CM_REGION)
     PARAMETER(PARAM_CM_MODE)
     PARAMETER(PARAM_DB_SIZE)
-    PARAMETER(PARAM_CALIBRATE_CM)
     PARAMETER(PARAM_CMLITE_MSA_EVAL)
 
     std::vector<MMseqsParameter*> splitstrand;

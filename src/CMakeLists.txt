@@ -21,11 +21,17 @@ target_include_directories(riboseek-framework BEFORE PUBLIC ${CMAKE_BINARY_DIR}/
 add_dependencies(riboseek-framework generated_riboseek)
 target_include_directories(riboseek-framework PUBLIC ${CMAKE_SOURCE_DIR}/lib)
 
-# Infernal bridge
-if (TARGET infernal-bridge)
-    target_link_libraries(riboseek-framework infernal-bridge)
-    target_compile_definitions(riboseek-framework PUBLIC -DHAVE_INFERNAL_BRIDGE=1)
-endif()
+target_link_libraries(riboseek-framework
+    infernal-vendor-core
+    infernal-vendor-hmmer
+    infernal-vendor-easel)
+target_include_directories(riboseek-framework PRIVATE
+    ${CMAKE_BINARY_DIR}/infernal-configure/src
+    ${CMAKE_BINARY_DIR}/infernal-configure/easel
+    ${INFERNAL_ROOT}/src
+    ${INFERNAL_ROOT}/hmmer/src
+    ${INFERNAL_ROOT}/easel
+)
 target_link_libraries(riboseek-framework tornadofold::tornadofold)
 
 

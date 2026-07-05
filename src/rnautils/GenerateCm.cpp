@@ -1,47 +1,37 @@
-#include "LocalCommandDeclarations.h"
-#include "CommandDeclarations.h"
+#include "LocalParameters.h"
 #include "Debug.h"
 #include "DBReader.h"
 #include "DBWriter.h"
 #include "FileUtil.h"
-#include "MMseqsMPI.h"
-#include "Parameters.h"
 #include "RnaFoldingBridge.h"
 #include "Matcher.h"
 #include "Orf.h"
-#include "LocalParameters.h"
 #include "MsaFilter.h"
 #include "MultipleAlignment.h"
 #include "SubstitutionMatrix.h"
 #include "Util.h"
 #include "DinucleotideMapping.h"
-#ifdef HAVE_INFERNAL_BRIDGE
-#include "infernal/InfernalBridge.h"
-#endif
+
+#include <set>
+#include <unordered_map>
 
 #ifdef OPENMP
 #include <omp.h>
 #endif
 
-#include <algorithm>
-#include <cctype>
-#include <cstdio>
-#include <cstdlib>
-#include <set>
-#include <sstream>
-#include <string>
-#include <vector>
-#include <unordered_map>
-#include <sys/stat.h>
-#include <unistd.h>
+extern bool cmbuildFromAlignment(
+    const std::string &name,
+    const std::vector<std::string> &sqnames,
+    const std::vector<std::string> &aseqs,
+    const std::string &ssCons,
+    std::string &cmText, std::string &err
+);
+extern void cmInfernalGlobalInit();
 
-// Native generatecm command:
-// maps DB -> DB covariance-model generation to MMseqs profile construction.
+extern int result2profile(int argc, const char **argv, const Command& command);
 int generatecm(int argc, const char **argv, const Command &command) {
     return result2profile(argc, argv, command);
 }
-
-namespace {
 
 struct AlnSeq {
     std::string id;
@@ -134,32 +124,6 @@ static inline unsigned char encodeAlignedNuc(char c) {
         default:  return MultipleAlignment::NAA;  // N or anything else → ANY
     }
 }
-
-static std::string buildStockholmText(const std::string &id,
-                                      const std::vector<AlnSeq> &seqs,
-                                      const std::string &ssCons) {
-    std::ostringstream out;
-    out << "# STOCKHOLM 1.0\n";
-    out << "#=GF ID " << (id.empty() ? "mmseqs_model" : id) << "\n";
-    for (size_t i = 0; i < seqs.size(); ++i) {
-        std::string rnaAln = seqs[i].aln;
-        convertTsToUs(rnaAln);
-        out << seqs[i].id << " " << rnaAln << "\n";
-    }
-    // Force every alignment column to be a CM match column via --hand: RF line
-    // of all 'x' makes consensus column c map 1:1 to query position c-1, so
-    // cmsearch traces are directly query-coord and result_t records stay
-    // compatible with result2dnamsa / convertalis.
-    if (!seqs.empty() && !seqs[0].aln.empty()) {
-        out << "#=GC RF " << std::string(seqs[0].aln.size(), 'x') << "\n";
-    }
-    if (!ssCons.empty()) {
-        out << "#=GC SS_cons " << ssCons << "\n";
-    }
-    out << "//\n";
-    return out.str();
-}
-
 
 static std::string trimCopy(const std::string &s) {
     size_t b = 0;
@@ -461,8 +425,6 @@ static bool mergeCmbuildInputs(const std::string &queryDb,
     return true;
 }
 
-} // namespace
-
 int cmbuild(int argc, const char **argv, const Command &command) {
     LocalParameters &par = LocalParameters::getLocalInstance();
     // Defaults for the optional MSA row filter (off; rMSA-style cov+id+Ndiff
@@ -509,10 +471,8 @@ int cmbuild(int argc, const char **argv, const Command &command) {
                         0,
                         0);
 
-#ifndef HAVE_INFERNAL_BRIDGE
-    Debug(Debug::ERROR) << "cmbuild requires Infernal bridge support\n";
-    return EXIT_FAILURE;
-#else
+    // initialize Infernal logsum tables once
+    cmInfernalGlobalInit();
 
     const std::vector<std::string> targetDbList = splitCommaList(rawTargetDbArg.empty() ? par.db2 : rawTargetDbArg);
     const std::vector<std::string> resultDbList = splitCommaList(rawResultDbArg.empty() ? par.db3 : rawResultDbArg);
@@ -542,15 +502,6 @@ int cmbuild(int argc, const char **argv, const Command &command) {
         par.db3Index = mergedResultDb + ".index";
         Debug(Debug::INFO) << "cmbuild: merged target DB: " << par.db2 << "\n";
         Debug(Debug::INFO) << "cmbuild: merged result DB: " << par.db3 << "\n";
-    }
-
-    // Fork Infernal workers BEFORE loading DBs. Each worker stays ~small
-    // (few MB) instead of CoW-ing a post-mmap fat parent, which serializes
-    // forks under the kernel mm lock.
-    InfernalBridge::WorkerPool *workerPool = InfernalBridge::startWorkerPool(par.threads);
-    if (workerPool == NULL) {
-        Debug(Debug::ERROR) << "cmbuild: failed to start Infernal worker pool\n";
-        return EXIT_FAILURE;
     }
 
     DBReader<unsigned int> qDbr(par.db1.c_str(), par.db1Index.c_str(), par.threads,
@@ -807,29 +758,26 @@ int cmbuild(int argc, const char **argv, const Command &command) {
                 stoSeqs = std::move(keptSeqs);
             }
 
-            std::string stoText = buildStockholmText(
-                "query_" + std::to_string(queryKey), stoSeqs, ssCons);
-
-            if (const char *dumpPath = std::getenv("RIBOSEEK_DUMP_STOCKHOLM")) {
-                std::string outPath = std::string(dumpPath) + "/query_" + std::to_string(queryKey) + ".sto";
-                FILE *fp = std::fopen(outPath.c_str(), "w");
-                if (fp != nullptr) {
-                    std::fwrite(stoText.data(), 1, stoText.size(), fp);
-                    std::fclose(fp);
-                }
-            }
-
-            // Call Infernal bridge to build CM. Bridge forks per call so OMP workers
-            // can build in parallel despite Infernal's process-wide global state.
+            const std::string modelName = "query_" + std::to_string(queryKey);
             std::string cmText;
-            std::string infernalErr;
-            bool success = InfernalBridge::buildCmFromStockholmText(workerPool, stoText, cmText, infernalErr, par.calibrateCm);
+            std::string buildErr;
+            std::vector<std::string> sqnames;
+            std::vector<std::string> aseqs;
+            sqnames.reserve(stoSeqs.size());
+            aseqs.reserve(stoSeqs.size());
+            for (const AlnSeq &s : stoSeqs) {
+                sqnames.push_back(s.id);
+                std::string row = s.aln;
+                convertTsToUs(row);
+                aseqs.push_back(std::move(row));
+            }
+            bool success = cmbuildFromAlignment(modelName, sqnames, aseqs, ssCons, cmText, buildErr);
 
             if (success) {
                 cmWriter.writeData(cmText.c_str(), cmText.size(), queryKey, thread_idx);
             } else {
-                Debug(Debug::WARNING) << "cmbuild: Infernal failed for query " << queryKey
-                                      << ": " << infernalErr << "\n";
+                Debug(Debug::WARNING) << "cmbuild: build failed for query " << queryKey
+                                      << ": " << buildErr << "\n";
             }
         }
     }
@@ -842,7 +790,5 @@ int cmbuild(int argc, const char **argv, const Command &command) {
     }
     qDbr.close();
 
-    InfernalBridge::stopWorkerPool(workerPool);
     return EXIT_SUCCESS;
-#endif // HAVE_INFERNAL_BRIDGE
 }

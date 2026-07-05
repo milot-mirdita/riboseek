@@ -17,11 +17,6 @@ LocalParameters::LocalParameters() : Parameters(),
         "Effective database size (0: use actual size)",
         typeid(size_t), (void *) &dbSize,
         "^[0-9]+$", MMseqsParameter::COMMAND_ALIGN),
-    PARAM_CALIBRATE_CM(PARAM_CALIBRATE_CM_ID, "--calibrate-cm", "Calibrate CM",
-        "Run Infernal cmcalibrate after cmbuild to fit E-value exp-tail parameters.\n"
-        "Slow (~1-2s per query). Off by default; CmScan uses a native E-value fallback.",
-        typeid(bool), (void *) &calibrateCm,
-        "", MMseqsParameter::COMMAND_MISC),
     PARAM_CMLITE_MSA_EVAL(PARAM_CMLITE_MSA_EVAL_ID, "--cmlite-msa-eval", "CmLite MSA E-value",
         "Include only hits with <= this E-value when building the cmbuild seed CM.\n"
         "All hits from resultDB are still searched afterward; this only filters the CM-building subset.",
@@ -31,7 +26,6 @@ LocalParameters::LocalParameters() : Parameters(),
     cmRegionFlanking = 0.0f;
     cmMode = 0;
     dbSize = 0;
-    calibrateCm = false;
     cmliteMsaEvalThr = DBL_MAX;
 
     // Register dinuc.out as compiled-in matrix and set as default
@@ -54,7 +48,6 @@ LocalParameters::LocalParameters() : Parameters(),
     splitstrand.push_back(&PARAM_COMPRESSED);
     splitstrand.push_back(&PARAM_V);
 
-    cmbuild.push_back(&PARAM_CALIBRATE_CM);
     // hhfilter/rMSA-style row filter on the cmbuild input MSA (off by default)
     cmbuild.push_back(&PARAM_FILTER_MSA);
     cmbuild.push_back(&PARAM_FILTER_MAX_SEQ_ID);
