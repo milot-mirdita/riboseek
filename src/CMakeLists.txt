@@ -26,8 +26,7 @@ target_link_libraries(riboseek-framework
     infernal-vendor-hmmer
     infernal-vendor-easel)
 target_include_directories(riboseek-framework PRIVATE
-    ${CMAKE_BINARY_DIR}/infernal-configure/src
-    ${CMAKE_BINARY_DIR}/infernal-configure/easel
+    ${INFERNAL_CONFIG_DIR}
     ${INFERNAL_ROOT}/src
     ${INFERNAL_ROOT}/hmmer/src
     ${INFERNAL_ROOT}/easel

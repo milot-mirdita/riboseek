@@ -3,68 +3,17 @@ set(INFERNAL_HMMER_DIR ${INFERNAL_ROOT}/hmmer)
 set(INFERNAL_HMMER_SRC_DIR ${INFERNAL_ROOT}/hmmer/src)
 set(INFERNAL_EASEL_DIR ${INFERNAL_ROOT}/easel)
 
-# out-of-source autoconf configure for hmmer+easel
-set(INFERNAL_CONFIGURE_DIR ${CMAKE_BINARY_DIR}/infernal-configure)
-
-if (NOT EXISTS ${INFERNAL_HMMER_DIR}/configure)
-    message(FATAL_ERROR "hmmer configure script not found at ${INFERNAL_HMMER_DIR}/configure")
-endif ()
-
-if (NOT EXISTS ${INFERNAL_CONFIGURE_DIR}/src/p7_config.h)
-    # hmmer's configure needs easel/Makefile.in reachable as ${srcdir}/easel/Makefile.in.
-    # The symlink is committed, but recreate it as a fallback for environments where
-    # git does not restore symlinks (e.g. Windows without core.symlinks).
-    if (NOT EXISTS ${INFERNAL_HMMER_DIR}/easel)
-        execute_process(
-                COMMAND ${CMAKE_COMMAND} -E create_symlink ../easel ${INFERNAL_HMMER_DIR}/easel
-                RESULT_VARIABLE _symlink_rc
-        )
-        if (NOT _symlink_rc EQUAL 0)
-            message(FATAL_ERROR "Failed to create easel symlink in ${INFERNAL_HMMER_DIR}")
-        endif ()
-    endif ()
-    # Pass --host so configure uses the right target architecture and skips
-    # run-time probes that fail when cross-compiling
-    set(_hmmer_configure_args "CC=${CMAKE_C_COMPILER}" "CFLAGS=${CMAKE_C_FLAGS}")
-    if (CMAKE_OSX_ARCHITECTURES MATCHES "x86_64")
-        # macOS cross-arch build targeting x86_64 (e.g. on Apple Silicon)
-        list(APPEND _hmmer_configure_args --host=x86_64-apple-darwin)
-    elseif (CMAKE_OSX_ARCHITECTURES MATCHES "arm64")
-        list(APPEND _hmmer_configure_args --host=aarch64-apple-darwin)
-    elseif (NOT APPLE)
-        # Ask the compiler for its target triple
-        execute_process(
-                COMMAND ${CMAKE_C_COMPILER} -dumpmachine
-                OUTPUT_VARIABLE _compiler_target
-                OUTPUT_STRIP_TRAILING_WHITESPACE
-        )
-        if (_compiler_target)
-            list(APPEND _hmmer_configure_args --host=${_compiler_target})
-        endif ()
-    endif ()
-    file(MAKE_DIRECTORY ${INFERNAL_CONFIGURE_DIR})
-    message(STATUS "Configuring hmmer out-of-source in ${INFERNAL_CONFIGURE_DIR} (args: ${_hmmer_configure_args})")
-    execute_process(
-            COMMAND ${INFERNAL_HMMER_DIR}/configure ${_hmmer_configure_args}
-            WORKING_DIRECTORY ${INFERNAL_CONFIGURE_DIR}
-            RESULT_VARIABLE _configure_rc
-    )
-    if (NOT _configure_rc EQUAL 0)
-        message(FATAL_ERROR "./configure failed for hmmer (exit code ${_configure_rc})")
-    endif ()
-endif ()
-
 if (NOT EXISTS ${INFERNAL_SRC_DIR}/config.h)
-    message(FATAL_ERROR "Infernal bridge requires generated ${INFERNAL_SRC_DIR}/config.h in INFERNAL_ROOT")
+    message(FATAL_ERROR "vendored infernal requires ${INFERNAL_SRC_DIR}/config.h")
 endif ()
-if (NOT EXISTS ${INFERNAL_CONFIGURE_DIR}/src/p7_config.h)
-    message(FATAL_ERROR "hmmer configure did not produce ${INFERNAL_CONFIGURE_DIR}/src/p7_config.h")
-endif ()
-if (NOT EXISTS ${INFERNAL_CONFIGURE_DIR}/easel/esl_config.h)
-    message(FATAL_ERROR "hmmer configure did not produce ${INFERNAL_CONFIGURE_DIR}/easel/esl_config.h")
+if (NOT EXISTS ${INFERNAL_CONFIG_DIR}/p7_config.h OR NOT EXISTS ${INFERNAL_CONFIG_DIR}/esl_config.h)
+    message(FATAL_ERROR "missing config headers in ${INFERNAL_CONFIG_DIR}")
 endif ()
 
-find_package(Threads REQUIRED)
+# Build Infernal/HMMER/Easel with the same SIMD/arch flags as riboseek (MMSEQS_ARCH).
+if (MMSEQS_ARCH)
+    set(CMAKE_C_FLAGS "${CMAKE_C_FLAGS} ${MMSEQS_ARCH}")
+endif ()
 
 set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/easel.c
@@ -75,7 +24,7 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_bitfield.c
         ${INFERNAL_EASEL_DIR}/esl_buffer.c
         ${INFERNAL_EASEL_DIR}/esl_cluster.c
-        ${INFERNAL_EASEL_DIR}/esl_composition.c
+        # ${INFERNAL_EASEL_DIR}/esl_composition.c
         # ${INFERNAL_EASEL_DIR}/esl_cpu.c
         ${INFERNAL_EASEL_DIR}/esl_dirichlet.c
         ${INFERNAL_EASEL_DIR}/esl_distance.c
@@ -90,7 +39,7 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_graph.c
         ${INFERNAL_EASEL_DIR}/esl_gumbel.c
         # ${INFERNAL_EASEL_DIR}/esl_heap.c
-        ${INFERNAL_EASEL_DIR}/esl_histogram.c
+        # ${INFERNAL_EASEL_DIR}/esl_histogram.c
         ${INFERNAL_EASEL_DIR}/esl_hmm.c
         # ${INFERNAL_EASEL_DIR}/esl_huffman.c
         # ${INFERNAL_EASEL_DIR}/esl_hyperexp.c
@@ -123,12 +72,12 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_random.c
         ${INFERNAL_EASEL_DIR}/esl_rand64.c
         ${INFERNAL_EASEL_DIR}/esl_randomseq.c
-        ${INFERNAL_EASEL_DIR}/esl_ratematrix.c
+        # ${INFERNAL_EASEL_DIR}/esl_ratematrix.c
         # ${INFERNAL_EASEL_DIR}/esl_recorder.c
         # ${INFERNAL_EASEL_DIR}/esl_red_black.c
         # ${INFERNAL_EASEL_DIR}/esl_regexp.c
         ${INFERNAL_EASEL_DIR}/esl_rootfinder.c
-        ${INFERNAL_EASEL_DIR}/esl_scorematrix.c
+        # ${INFERNAL_EASEL_DIR}/esl_scorematrix.c
         ${INFERNAL_EASEL_DIR}/esl_sq.c
         ${INFERNAL_EASEL_DIR}/esl_sqio.c
         ${INFERNAL_EASEL_DIR}/esl_sqio_ascii.c
@@ -139,17 +88,17 @@ set(EASEL_SRCS
         ${INFERNAL_EASEL_DIR}/esl_stopwatch.c
         # ${INFERNAL_EASEL_DIR}/esl_stretchexp.c
         # ${INFERNAL_EASEL_DIR}/esl_subcmd.c
-        ${INFERNAL_EASEL_DIR}/esl_threads.c
+        # ${INFERNAL_EASEL_DIR}/esl_threads.c
         ${INFERNAL_EASEL_DIR}/esl_tree.c
         # ${INFERNAL_EASEL_DIR}/esl_varint.c
         ${INFERNAL_EASEL_DIR}/esl_vectorops.c
         # ${INFERNAL_EASEL_DIR}/esl_weibull.c
-        ${INFERNAL_EASEL_DIR}/esl_workqueue.c
+        # ${INFERNAL_EASEL_DIR}/esl_workqueue.c
         ${INFERNAL_EASEL_DIR}/esl_wuss.c
 )
 
 set(HMMER_SRCS
-        ${INFERNAL_HMMER_SRC_DIR}/build.c
+        # ${INFERNAL_HMMER_SRC_DIR}/build.c
         # ${INFERNAL_HMMER_SRC_DIR}/cachedb.c
         # ${INFERNAL_HMMER_SRC_DIR}/cachedb_shard.c
         ${INFERNAL_HMMER_SRC_DIR}/emit.c
@@ -168,7 +117,7 @@ set(HMMER_SRCS
         # ${INFERNAL_HMMER_SRC_DIR}/generic_vtrace.c
         # ${INFERNAL_HMMER_SRC_DIR}/h2_io.c
         # ${INFERNAL_HMMER_SRC_DIR}/heatmap.c
-        ${INFERNAL_HMMER_SRC_DIR}/hmmlogo.c
+        # ${INFERNAL_HMMER_SRC_DIR}/hmmlogo.c
         # ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr.c
         # ${INFERNAL_HMMER_SRC_DIR}/hmmdmstr_shard.c
         # ${INFERNAL_HMMER_SRC_DIR}/hmmd_search_status.c
@@ -180,11 +129,11 @@ set(HMMER_SRCS
         ${INFERNAL_HMMER_SRC_DIR}/modelconfig.c
         ${INFERNAL_HMMER_SRC_DIR}/modelstats.c
         # ${INFERNAL_HMMER_SRC_DIR}/mpisupport.c
-        ${INFERNAL_HMMER_SRC_DIR}/seqmodel.c
+        # ${INFERNAL_HMMER_SRC_DIR}/seqmodel.c
         ${INFERNAL_HMMER_SRC_DIR}/tracealign.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_alidisplay.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_bg.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_builder.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_builder.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_domain.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_domaindef.c
         # ${INFERNAL_HMMER_SRC_DIR}/p7_gbands.c
@@ -198,7 +147,7 @@ set(HMMER_SRCS
         ${INFERNAL_HMMER_SRC_DIR}/p7_hmmfile.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_hmmwindow.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_pipeline.c
-        ${INFERNAL_HMMER_SRC_DIR}/p7_prior.c
+        # ${INFERNAL_HMMER_SRC_DIR}/p7_prior.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_profile.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_spensemble.c
         ${INFERNAL_HMMER_SRC_DIR}/p7_tophits.c
@@ -283,29 +232,27 @@ set(INFERNAL_CORE_SRCS
 add_library(infernal-vendor-easel STATIC ${EASEL_SRCS})
 target_compile_definitions(infernal-vendor-easel PRIVATE HAVE_CONFIG_H=1)
 target_include_directories(infernal-vendor-easel PRIVATE
-        ${INFERNAL_CONFIGURE_DIR}/easel
+        ${INFERNAL_CONFIG_DIR}
         ${INFERNAL_EASEL_DIR}
 )
-target_link_libraries(infernal-vendor-easel PUBLIC Threads::Threads m)
+target_link_libraries(infernal-vendor-easel PUBLIC m)
 
 add_library(infernal-vendor-hmmer STATIC ${HMMER_SRCS} ${HMMER_IMPL_SRCS})
 target_compile_definitions(infernal-vendor-hmmer PRIVATE HAVE_CONFIG_H=1)
 target_include_directories(infernal-vendor-hmmer PRIVATE
-        ${INFERNAL_CONFIGURE_DIR}/src
-        ${INFERNAL_CONFIGURE_DIR}/easel
+        ${INFERNAL_CONFIG_DIR}
         ${INFERNAL_HMMER_SRC_DIR}
         ${HMMER_IMPL_DIR}
         ${INFERNAL_EASEL_DIR}
 )
-target_link_libraries(infernal-vendor-hmmer PUBLIC infernal-vendor-easel Threads::Threads m)
+target_link_libraries(infernal-vendor-hmmer PUBLIC infernal-vendor-easel m)
 
 add_library(infernal-vendor-core STATIC ${INFERNAL_CORE_SRCS})
 target_compile_definitions(infernal-vendor-core PRIVATE HAVE_CONFIG_H=1)
 target_include_directories(infernal-vendor-core PRIVATE
-        ${INFERNAL_CONFIGURE_DIR}/src
-        ${INFERNAL_CONFIGURE_DIR}/easel
+        ${INFERNAL_CONFIG_DIR}
         ${INFERNAL_SRC_DIR}
         ${INFERNAL_HMMER_SRC_DIR}
         ${INFERNAL_EASEL_DIR}
 )
-target_link_libraries(infernal-vendor-core PUBLIC infernal-vendor-hmmer infernal-vendor-easel Threads::Threads m)
+target_link_libraries(infernal-vendor-core PUBLIC infernal-vendor-hmmer infernal-vendor-easel m)
