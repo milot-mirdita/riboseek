@@ -47,11 +47,48 @@ double targetRelent(int clen, int nbps) {
     return (etarget > reTarget) ? etarget : reTarget;
 }
 
+// Round a probability the same way as ASCII CM
+static inline float asciiRoundProb(float p, float nullLog, float nullMul) {
+    if (p == 0.0f) return 0.0f;
+    double sc = std::log((double) p / (double) nullLog) * 1.44269504;
+    double r  = std::round(sc * 1000.0) / 1000.0;
+    return (float) (std::exp(r / 1.44269504) * (double) nullMul);
+}
+
+// Quantize to the ASCII CM-file precision
+static void quantizeCM(CM_t *cm) {
+    const int K = cm->abc->K;
+    std::vector<float> nullOrig(cm->null, cm->null + K);
+    for (int x = 0; x < K; x++) {
+        cm->null[x] = asciiRoundProb(cm->null[x], 1.0f / (float) K, 1.0f / (float) K);
+    }
+    for (int v = 0; v < cm->M; v++) {
+        if (cm->sttype[v] != B_st)
+            for (int x = 0; x < cm->cnum[v]; x++) {
+                cm->t[v][x] = asciiRoundProb(cm->t[v][x], 1.0f, 1.0f);
+            }
+        if (cm->sttype[v] == MP_st) {
+            for (int x = 0; x < K; x++) {
+                for (int y = 0; y < K; y++) {
+                   cm->e[v][x*K+y] = asciiRoundProb(cm->e[v][x*K+y], nullOrig[x]*nullOrig[y], cm->null[x]*cm->null[y]);
+                }
+            }
+        } else if (cm->sttype[v]==ML_st || cm->sttype[v]==MR_st || cm->sttype[v]==IL_st || cm->sttype[v]==IR_st) {
+            for (int x = 0; x < K; x++) {
+                cm->e[v][x] = asciiRoundProb(cm->e[v][x], nullOrig[x], cm->null[x]);
+            }
+        }
+    }
+}
+
 bool cmbuildFromAlignment(const std::string &name,
                                   const std::vector<std::string> &sqnames,
                                   const std::vector<std::string> &aseqs,
                                   const std::string &ssCons,
-                                  std::string &cmText, std::string &err) {
+                                  std::string &cmText, std::string &err,
+                                  double ereOverride, double symfracOpt, bool noss,
+                                  bool forScan, bool useInside, bool useLocal,
+                                  CM_t **ret_cm) {
     if (aseqs.empty()) { err = "no sequences"; return false; }
     if (sqnames.size() != aseqs.size()) { err = "name/row count mismatch"; return false; }
     const int nseq = (int) aseqs.size();
@@ -59,8 +96,10 @@ bool cmbuildFromAlignment(const std::string &name,
     if (alen == 0) { err = "empty alignment rows"; return false; }
     for (const std::string &r : aseqs)
         if ((int) r.size() != alen) { err = "ragged alignment rows"; return false; }
-    if (ssCons.empty()) { err = "no SS_cons annotation"; return false; }
-    if ((int) ssCons.size() != alen) { err = "SS_cons length mismatch"; return false; }
+    if (!noss) {
+        if (ssCons.empty()) { err = "no SS_cons annotation"; return false; }
+        if ((int) ssCons.size() != alen) { err = "SS_cons length mismatch"; return false; }
+    }
 
     cmInfernalGlobalInit();
 
@@ -81,7 +120,12 @@ bool cmbuildFromAlignment(const std::string &name,
     memset(msa->rf, 'x', (size_t) alen);
     msa->rf[alen] = '\0';
     msa->ss_cons = (char *) malloc((size_t) alen + 1);
-    memcpy(msa->ss_cons, ssCons.c_str(), (size_t) alen);
+    // no base pairs -> sequence-only CM
+    if (noss) {
+        memset(msa->ss_cons, '.', (size_t) alen);
+    } else {
+        memcpy(msa->ss_cons, ssCons.c_str(), (size_t) alen);
+    }
     msa->ss_cons[alen] = '\0';
     esl_msa_SetName(msa, name.empty() ? "query" : name.c_str(), -1);
 
@@ -114,7 +158,9 @@ bool cmbuildFromAlignment(const std::string &name,
     // guide tree + expanded CM
     CM_t *cm = NULL;
     Parsetree_t *mtr = NULL;
-    if (HandModelmaker(msa, errbuf, TRUE, FALSE, FALSE, 0.5f, &cm, &mtr) != eslOK) {
+    const int   useRf = (symfracOpt < 0.0) ? TRUE : FALSE;  // <0: all columns via RF; else occupancy
+    const float symfr = (symfracOpt < 0.0) ? 0.5f : (float) symfracOpt;
+    if (HandModelmaker(msa, errbuf, useRf, FALSE, FALSE, symfr, &cm, &mtr) != eslOK) {
         err = std::string("HandModelmaker: ") + errbuf;
         esl_msa_Destroy(msa); esl_alphabet_Destroy(abc);
         return false;
@@ -192,7 +238,7 @@ bool cmbuildFromAlignment(const std::string &name,
     // entropy weighting
     {
         const int clen = cm->clen;
-        const double etarget = targetRelent(clen, nbps);
+        const double etarget = (ereOverride >= 0.0) ? ereOverride : targetRelent(clen, nbps);
         double hmm_re = 0.0, neff = 0.0;
         cm_EntropyWeight(cm, pri, etarget, 0.1, (double) cm->nseq, FALSE, &hmm_re, &neff);
         cm->eff_nseq = (float) neff;
@@ -204,6 +250,11 @@ bool cmbuildFromAlignment(const std::string &name,
     cm_find_and_detach_dual_inserts(cm, FALSE, TRUE);
     flattenInsertEmissions(cm);
     CMRenormalize(cm);
+    if (forScan) {
+        // round to CM-file precision + renorm, exactly as cm_file_Read
+        quantizeCM(cm);
+        CMRenormalize(cm);
+    }
 
     // QDB bands + W + logodds + consensus
     cm->beta_W = 1e-7;
@@ -211,6 +262,15 @@ bool cmbuildFromAlignment(const std::string &name,
     cm->qdbinfo->beta2 = 1e-15;
     // global mode: no CM_CONFIG_LOCAL
     cm->config_opts |= CM_CONFIG_QDB;
+    if (forScan) {
+        cm->config_opts |= CM_CONFIG_SCANMX | CM_CONFIG_NONBANDEDMX;
+        if (useLocal)  {
+            cm->config_opts |= CM_CONFIG_LOCAL | CM_CONFIG_HMMLOCAL | CM_CONFIG_HMMEL;
+        }
+        if (useInside) {
+            cm->search_opts |= CM_SEARCH_INSIDE;
+        }
+    }
     if (cm_Configure(cm, errbuf, -1) != eslOK) {
         err = std::string("cm_Configure: ") + errbuf;
         for (int i = 0; i < nseq; i++) FreeParsetree(tr[i]);
@@ -221,6 +281,20 @@ bool cmbuildFromAlignment(const std::string &name,
 
     // consensus for CM_ALIDISPLAY
     cm_SetConsensus(cm, cm->cmcons, NULL);
+
+    if (forScan) {
+        // caller owns cm; abc stays alive via cm->abc
+        *ret_cm = cm;
+        for (int i = 0; i < nseq; i++) {
+            FreeParsetree(tr[i]);
+        }
+        free(used_el);
+        Prior_Destroy(pri);
+        FreeParsetree(mtr);
+        free(null);
+        esl_msa_Destroy(msa);
+        return true;
+    }
 
     // Disable unused p7 HMM filter with very few iteration
     if (cm->mlp7 != NULL) {
@@ -261,13 +335,17 @@ bool cmbuildFromAlignment(const std::string &name,
                 ok = false;
             }
             fclose(fp);
-            if (ok) cmText.assign(buf, sz);
+            if (ok) {
+                cmText.assign(buf, sz);
+            }
             free(buf);
         }
     }
 
     // Cleanup
-    for (int i = 0; i < nseq; i++) FreeParsetree(tr[i]);
+    for (int i = 0; i < nseq; i++) {
+        FreeParsetree(tr[i]);
+    }
     free(used_el);
     Prior_Destroy(pri);
     FreeParsetree(mtr);
